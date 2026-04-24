@@ -1,0 +1,12 @@
+{
+  "domain": "electros_ev",
+  "name": "ElectroS EV Charger",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/your-repo/electros_ev",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/your-repo/electros_ev/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

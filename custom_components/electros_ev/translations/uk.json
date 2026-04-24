@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Зарядка ElectroS EV",
+        "description": "Введіть дані для підключення до зарядки ElectroS",
+        "data": {
+          "charger_login": "Логін (назва пристрою)",
+          "charger_password": "Пароль",
+          "scan_interval": "Інтервал оновлення (секунди)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не вдалося підключитися до зарядки",
+      "invalid_auth": "Невірна автентифікація",
+      "unknown": "Невідома помилка"
+    },
+    "abort": {
+      "already_configured": "Пристрій вже налаштовано"
+    }
+  }
+}
