@@ -69,6 +69,20 @@ It logs in with your credentials, opens a WebSocket connection, and reads/sends 
 - An ElectroS EV charger registered at electros.org.ua
 - Home Assistant 2024.1+
 
+## Disclaimer
+
+This project is **not affiliated with, endorsed by, or associated with ElectroS** or any of its subsidiaries.
+
+This software is provided **"as is"**, without warranty of any kind, express or implied. The authors and contributors are **not responsible for any damage, data loss, hardware malfunction, or any other harm** that may result from the use of this integration.
+
+By using this integration you acknowledge that:
+
+- You use it **at your own risk**
+- The integration communicates with a third-party cloud service (electros.org.ua) which may change its API at any time without notice
+- The authors have no control over the ElectroS service availability or behavior
+- Incorrect use of charging controls may affect your EV charger or vehicle — always verify charger behavior independently
+- Your credentials are stored locally in Home Assistant and are only sent to electros.org.ua for authentication
+
 ## License
 
 MIT
