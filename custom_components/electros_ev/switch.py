@@ -15,6 +15,9 @@ from .coordinator import ElectroSCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+# Statuses that mean the charger is actively charging or trying to charge
+_CHARGING_STATUSES = {"charging"}
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -52,23 +55,22 @@ class ElectroSChargingSwitch(CoordinatorEntity[ElectroSCoordinator], SwitchEntit
             "manufacturer": "ElectroS",
             "model": "EV Charger",
         }
-        self._last_amps = 16
 
     @property
     def is_on(self) -> bool | None:
         """Return true if charging."""
         if self.coordinator.data is None:
             return None
-        return self.coordinator.data.get("status_text") == "charging"
+        status = self.coordinator.data.get("status_text")
+        return status in _CHARGING_STATUSES
 
     async def async_turn_on(self, **kwargs) -> None:
-        """Start charging."""
-        success = await self.coordinator.api.start_charging(self._last_amps)
-        if success:
-            await self.coordinator.async_request_refresh()
+        """Start charging at the target amperage from coordinator."""
+        amps = self.coordinator.target_amps
+        _LOGGER.info("Turn ON requested, starting at %d A", amps)
+        await self.coordinator.async_start_charging(amps)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Stop charging."""
-        success = await self.coordinator.api.stop_charging()
-        if success:
-            await self.coordinator.async_request_refresh()
+        _LOGGER.info("Turn OFF requested")
+        await self.coordinator.async_stop_charging()

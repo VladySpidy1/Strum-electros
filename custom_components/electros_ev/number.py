@@ -62,21 +62,22 @@ class ElectroSAmpsNumber(CoordinatorEntity[ElectroSCoordinator], NumberEntity):
 
     @property
     def native_value(self) -> float | None:
-        """Return current configured amps."""
-        if self.coordinator.data is None:
-            return None
-        amps = self.coordinator.data.get("current_amps")
-        if amps is None:
-            return None
-        return float(amps)
+        """Return target amps from coordinator (not from charger poll).
+
+        This ensures the slider always shows what the user set,
+        not a stale value from the charger.
+        """
+        return float(self.coordinator.target_amps)
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set charging amperage."""
+        """Set charging amperage.
+
+        If charger is currently charging, sends the command immediately.
+        Otherwise, just stores the value for the next turn_on.
+        """
         amps = normalize_amps(int(value))
         if amps <= 0:
             _LOGGER.warning("Invalid amperage value: %s", value)
             return
-        _LOGGER.info("Setting charging amps to %d", amps)
-        success = await self.coordinator.api.start_charging(amps)
-        if success:
-            await self.coordinator.async_request_refresh()
+        _LOGGER.info("Slider set to %d A", amps)
+        await self.coordinator.async_set_amps(amps)
