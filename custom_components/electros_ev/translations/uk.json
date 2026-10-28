@@ -3,11 +3,11 @@
     "step": {
       "user": {
         "title": "Зарядка ElectroS EV",
-        "description": "Введіть дані вашої зарядки ElectroS. Вкажіть локальну адресу для прямого підключення у вашій мережі (без хмари).",
+        "description": "Введіть логін зарядки (назву пристрою). Для прямого підключення у вашій мережі вкажіть локальну IP/адресу зарядки, тоді пароль не обов'язковий. Без адреси використовується хмара (electros.org.ua), і потрібен пароль.",
         "data": {
           "charger_login": "Логін (назва пристрою)",
-          "charger_password": "Пароль",
-          "host": "Локальна IP/адреса (необов'язково — порожнє = хмара)",
+          "charger_password": "Пароль хмари",
+          "host": "Локальна IP/адреса (необов'язково, порожнє = хмара)",
           "scan_interval": "Інтервал оновлення (секунди)"
         }
       }
@@ -15,10 +15,248 @@
     "error": {
       "cannot_connect": "Не вдалося підключитися до зарядки",
       "invalid_auth": "Невірна автентифікація",
-      "unknown": "Невідома помилка"
+      "unknown": "Невідома помилка",
+      "password_required": "Для підключення через хмару потрібен пароль (або вкажіть локальну адресу)",
+      "login_required": "Введіть логін зарядки"
     },
     "abort": {
       "already_configured": "Пристрій вже налаштовано"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Налаштування ElectroS",
+        "description": "Зміна адреси перепідключає інтеграцію. Порожня адреса = хмара (потрібен пароль, введений при налаштуванні).",
+        "data": {
+          "host": "Локальна IP/адреса (необов'язково, порожнє = хмара)",
+          "scan_interval": "Інтервал оновлення (секунди)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не вдалося підключитися до зарядки",
+      "password_required": "Для підключення через хмару потрібен пароль (або вкажіть локальну адресу)",
+      "unknown": "Невідома помилка"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Статус",
+        "state": {
+          "waiting_for_vehicle": "Очікування авто",
+          "vehicle_connected_idle": "Авто підключено",
+          "charging": "Заряджає",
+          "charging_fault": "Помилка зарядки",
+          "charging_blocked": "Зарядку заблоковано",
+          "mains_voltage_low": "Низька напруга мережі",
+          "charger_communication_fault": "Помилка зв'язку",
+          "offline": "Офлайн",
+          "leakage_current_fault": "Витік струму",
+          "overcurrent_fault": "Струм перевищив 40 А",
+          "unknown": "Невідомо"
+        },
+        "state_attributes": {
+          "status_code": {
+            "name": "Код статусу"
+          },
+          "online": {
+            "name": "Онлайн"
+          },
+          "device_time": {
+            "name": "Годинник зарядки"
+          },
+          "events": {
+            "name": "Події"
+          }
+        }
+      },
+      "configured_current": {
+        "name": "Налаштований струм"
+      },
+      "measured_current": {
+        "name": "Виміряний струм"
+      },
+      "voltage": {
+        "name": "Напруга мережі",
+        "state_attributes": {
+          "min": {
+            "name": "Мінімум"
+          },
+          "max": {
+            "name": "Максимум"
+          },
+          "avg": {
+            "name": "Середнє"
+          }
+        }
+      },
+      "power": {
+        "name": "Потужність зарядки"
+      },
+      "energy": {
+        "name": "Спожита енергія"
+      },
+      "session_energy": {
+        "name": "Енергія сесії",
+        "state_attributes": {
+          "started_at": {
+            "name": "Початок"
+          },
+          "history": {
+            "name": "Історія"
+          }
+        }
+      },
+      "month_energy": {
+        "name": "Енергія за місяць",
+        "state_attributes": {
+          "months": {
+            "name": "Місяці"
+          },
+          "current_month": {
+            "name": "Поточний місяць"
+          }
+        }
+      },
+      "boost_end": {
+        "name": "Кінець зарядки за часом",
+        "state_attributes": {
+          "active": {
+            "name": "Активна"
+          },
+          "unlimited": {
+            "name": "Без обмеження"
+          },
+          "minutes": {
+            "name": "Хвилини"
+          },
+          "last_error": {
+            "name": "Остання помилка"
+          }
+        }
+      }
+    },
+    "switch": {
+      "charging": {
+        "name": "Зарядка"
+      },
+      "night_timer": {
+        "name": "Нічний таймер",
+        "state_attributes": {
+          "device_window": {
+            "name": "Вікно на зарядці"
+          }
+        }
+      },
+      "weekend_free": {
+        "name": "Вільна зарядка у вихідні"
+      }
+    },
+    "number": {
+      "charging_amps": {
+        "name": "Струм зарядки"
+      },
+      "boost_minutes": {
+        "name": "Тривалість зарядки за часом"
+      }
+    },
+    "time": {
+      "timer_start": {
+        "name": "Початок нічного вікна"
+      },
+      "timer_end": {
+        "name": "Кінець нічного вікна"
+      }
+    },
+    "button": {
+      "boost": {
+        "name": "Зарядити зараз"
+      },
+      "reset_energy": {
+        "name": "Скинути кВт·год"
+      }
+    }
+  },
+  "services": {
+    "charge_for": {
+      "name": "Заряджати протягом",
+      "description": "Почати зарядку зараз на вказану кількість хвилин в обхід нічного таймера, потім зупинити та відновити таймер.",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        },
+        "minutes": {
+          "name": "Хвилини",
+          "description": "Скільки часу заряджати."
+        },
+        "amps": {
+          "name": "Струм",
+          "description": "Струм зарядки в амперах (6-32, крок 2). Типово: налаштування струму зарядки."
+        }
+      }
+    },
+    "extend_charge": {
+      "name": "Продовжити зарядку",
+      "description": "Додати хвилини до активної зарядки за часом (якщо її немає, почати нову).",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        },
+        "minutes": {
+          "name": "Хвилини",
+          "description": "Скільки хвилин додати."
+        }
+      }
+    },
+    "stop_charging": {
+      "name": "Зупинити зарядку",
+      "description": "Зупинити зарядку, скасувати зарядку за часом і відновити нічний таймер.",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        }
+      }
+    },
+    "set_timer": {
+      "name": "Налаштувати нічний таймер",
+      "description": "Змінити нічне вікно та/або увімкнути чи вимкнути його.",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        },
+        "start": {
+          "name": "Початок",
+          "description": "Початок вікна (ГГ:ХХ)."
+        },
+        "end": {
+          "name": "Кінець",
+          "description": "Кінець вікна (ГГ:ХХ)."
+        },
+        "enabled": {
+          "name": "Увімкнено",
+          "description": "Увімкнути або вимкнути нічний таймер."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_device": {
+      "message": "Пристрій {device_id} не є зарядкою ElectroS."
+    },
+    "entry_not_loaded": {
+      "message": "Зарядка ElectroS {device_id} не завантажена."
+    },
+    "command_failed": {
+      "message": "Зарядка не прийняла команду {command} (недоступна?)."
+    },
+    "invalid_input": {
+      "message": "Невірні дані сервісу: {error}"
     }
   }
 }

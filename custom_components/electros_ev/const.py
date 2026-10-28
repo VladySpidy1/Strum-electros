@@ -1,11 +1,24 @@
 """Constants for ElectroS EV Charger integration."""
 
+from __future__ import annotations
+
+from .protocol import (  # re-exported for backwards compatibility
+    AMP_TO_INDEX,
+    OFFLINE_STATUS_CODES,
+    STATUS_KEYS as STATUS_TEXT_EN,
+    STATUS_OPTIONS,
+    SUPPORTED_AMPS,
+)
+
 DOMAIN = "electros_ev"
 DEFAULT_SCAN_INTERVAL = 60
+MIN_SCAN_INTERVAL = 30
+MAX_SCAN_INTERVAL = 600
 
 CONF_CHARGER_LOGIN = "charger_login"
 CONF_CHARGER_PASSWORD = "charger_password"
 CONF_HOST = "host"  # optional: charger IP/hostname for local (no-cloud) connection
+CONF_SCAN_INTERVAL = "scan_interval"
 DEFAULT_LOCAL_PORT = 80
 DEFAULT_LOCAL_WS_PATH = "/ws"
 CONF_WS_HOST = "ws_host"
@@ -13,7 +26,6 @@ CONF_WS_PATH = "ws_path"
 CONF_WS_ORIGIN = "ws_origin"
 CONF_WS_PROTOCOL = "ws_protocol"
 CONF_BASE_URL = "base_url"
-CONF_SCAN_INTERVAL = "scan_interval"
 
 DEFAULT_WS_HOST = "electros.org.ua"
 DEFAULT_WS_PATH = "/ws/"
@@ -21,25 +33,33 @@ DEFAULT_WS_ORIGIN = "https://electros.org.ua"
 DEFAULT_WS_PROTOCOL = "example-protocol"
 DEFAULT_BASE_URL = "https://electros.org.ua/auth/"
 
-AMP_TO_INDEX = {
-    32: 0,
-    30: 1,
-    28: 2,
-    26: 3,
-    24: 4,
-    22: 5,
-    20: 6,
-    18: 7,
-    16: 8,
-    14: 9,
-    12: 10,
-    10: 11,
-    8: 12,
-    6: 13,
-}
+# Timer / boost defaults
+DEFAULT_TIMER_START = "23:00"
+DEFAULT_TIMER_END = "07:00"
+DEFAULT_BOOST_MINUTES = 30
+MIN_BOOST_MINUTES = 5
+MAX_BOOST_MINUTES = 480
+BOOST_MINUTES_STEP = 5
+DEFAULT_CHARGING_AMPS = 6
 
-SUPPORTED_AMPS = sorted(AMP_TO_INDEX)
+# Services
+ATTR_DEVICE_ID = "device_id"
+ATTR_MINUTES = "minutes"
+ATTR_AMPS = "amps"
+ATTR_START = "start"
+ATTR_END = "end"
+ATTR_ENABLED = "enabled"
+SERVICE_CHARGE_FOR = "charge_for"
+SERVICE_EXTEND_CHARGE = "extend_charge"
+SERVICE_STOP_CHARGING = "stop_charging"
+SERVICE_SET_TIMER = "set_timer"
+SERVICE_MAX_MINUTES = 1440
 
+# Frontend card
+CARD_URL = f"/{DOMAIN}/electros-card.js"
+CARD_FILENAME = "electros-card.js"
+
+# Legacy Ukrainian status names (kept for anything that still imports them).
 STATUS_TEXT = {
     "0": "Очікування авто",
     "1": "Авто підключено",
@@ -54,18 +74,3 @@ STATUS_TEXT = {
     "77": "Офлайн",
 }
 
-STATUS_TEXT_EN = {
-    "0": "waiting_for_vehicle",
-    "1": "vehicle_connected_idle",
-    "2": "charging",
-    "3": "charging_fault",
-    "4": "charging_blocked",
-    "5": "mains_voltage_low",
-    "6": "charger_communication_fault",
-    "7": "offline",
-    "16": "leakage_current_fault",
-    "32": "overcurrent_fault",
-    "77": "offline",
-}
-
-OFFLINE_STATUS_CODES = {"7", "77"}

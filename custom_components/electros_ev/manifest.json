@@ -3,12 +3,12 @@
   "name": "ElectroS EV Charger",
   "codeowners": [],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["http", "frontend"],
   "documentation": "https://github.com/podzolkov/electros-ev-ha-from-andriy",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/podzolkov/electros-ev-ha-from-andriy/issues",
   "requirements": [],
-  "version": "1.2.0",
+  "version": "2.0.0",
   "integration_type": "device",
   "icon": "mdi:ev-station"
 }

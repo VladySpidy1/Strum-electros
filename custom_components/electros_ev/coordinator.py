@@ -1,30 +1,82 @@
-"""DataUpdateCoordinator for ElectroS EV Charger."""
+"""Coordinator and timer/boost engine for ElectroS EV Charger.
+
+Polling (DataUpdateCoordinator) plus the logic that owns the charger's daily
+timer window:
+
+* The device timer is written ONLY on transitions: user changes (night timer,
+  times, weekend_free, ``set_timer``), boost start/stop/expiry, the daily
+  weekend-boundary check at 00:00:05 and once after startup if the device
+  differs from what HA wants. Never on a plain poll.
+* If a poll shows a window that differs from what HA last wrote, at least
+  ``ADOPT_GRACE`` seconds after HA's last write and with no boost active, the
+  user changed it in the electros web panel: HA adopts it instead of fighting.
+* A boost ("charge for N minutes") disables the timer, starts charging and is
+  stopped by a scheduled callback; the timer is then restored (reconciled).
+  A manual start while the timer blocks charging is an unlimited boost that
+  ends when charging stops.
+"""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
+from datetime import datetime, timedelta
 import logging
-from datetime import timedelta
+import time
+from typing import Any
 
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_point_in_utc_time,
+    async_track_time_change,
+)
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .charger_api import ElectroSApi, normalize_amps
-from .const import DOMAIN
+from . import protocol
+from .charger_api import ElectroSApi
+from .const import (
+    CONF_CHARGER_LOGIN,
+    DEFAULT_CHARGING_AMPS,
+    DOMAIN,
+    MAX_BOOST_MINUTES,
+    MIN_BOOST_MINUTES,
+)
+from .storage import (
+    STORAGE_VERSION,
+    BoostState,
+    ElectroSStoredState,
+    storage_key,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-COMMAND_SETTLE_DELAY = 3   # seconds to wait after sending a command before first refresh
-POST_STOP_REFRESHES = 3    # how many times to refresh after stop
-POST_STOP_INTERVAL = 5     # seconds between post-stop refreshes
+COMMAND_SETTLE_DELAY = 3  # s after a command before refreshing
+TIMER_SETTLE_DELAY = 3  # s between disabling the timer and sending start
+FOLLOWUP_REFRESH_DELAY = 10  # s, one more refresh after a command
+ADOPT_GRACE = 120  # s after HA's own timer write during which polls never adopt
+START_CHECK_WINDOW = 120  # s after a start during which status 4 is reported
+UNLIMITED_START_GRACE = timedelta(minutes=15)  # unlimited bypass that never charged
+SAVE_DELAY = 30  # s, coalesced saves for frequently changing values (session)
+
+ERROR_CHARGING_BLOCKED = "charging_blocked"
+
+_STATUSES_WITHOUT_INFO = {protocol.STATUS_OFFLINE, protocol.STATUS_UNKNOWN}
 
 
-class ElectroSCoordinator(DataUpdateCoordinator[dict]):
-    """Coordinator to manage fetching ElectroS charger data."""
+class ElectroSCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Polls the charger and drives the timer/boost engine."""
+
+    config_entry: ConfigEntry
 
     def __init__(
         self,
         hass: HomeAssistant,
+        entry: ConfigEntry,
         api: ElectroSApi,
         scan_interval: int,
     ) -> None:
@@ -32,96 +84,676 @@ class ElectroSCoordinator(DataUpdateCoordinator[dict]):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=DOMAIN,
             update_interval=timedelta(seconds=scan_interval),
         )
         self.api = api
-        self.target_amps: int = 6        # desired amps set by user
-        self._user_set_amps: bool = False # True once user has explicitly set amps
+        self.login: str = entry.data[CONF_CHARGER_LOGIN]
+        self.stored = ElectroSStoredState()
+        self.last_error: str | None = None
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, storage_key(entry.entry_id)
+        )
+        self._op_lock = asyncio.Lock()
+        self._device_amps: int | None = None
+        self._unsub_boost: CALLBACK_TYPE | None = None
+        self._unsub_followup: CALLBACK_TYPE | None = None
+        self._last_write_mono: float | None = None
+        self._started = False
+        self._startup_pending = True
+        self._reconcile_retry = False
+        self._ending_boost = False
+        self._start_check_until: float | None = None
+        self._blocked_warned = False
 
-    async def _async_update_data(self) -> dict:
+    # ------------------------------------------------------------------ #
+    # Lifecycle
+    # ------------------------------------------------------------------ #
+
+    async def async_load(self) -> None:
+        """Load persisted state (before the first refresh)."""
+        data = await self._store.async_load()
+        self.stored = ElectroSStoredState.from_dict(data)
+
+    @callback
+    def async_start(self) -> None:
+        """Start timers and the startup task (after platforms are set up)."""
+        entry = self.config_entry
+        entry.async_on_unload(
+            async_track_time_change(
+                self.hass, self._handle_daily, hour=0, minute=0, second=5
+            )
+        )
+        entry.async_on_unload(self._cancel_timers)
+        self._create_task(self._async_startup(), "startup")
+
+    async def async_unload(self) -> None:
+        """Cancel timers and flush the store (entry unload)."""
+        self._cancel_timers()
+        await self._async_save()
+
+    @callback
+    def _cancel_timers(self) -> None:
+        self._cancel_boost_timer()
+        if self._unsub_followup is not None:
+            self._unsub_followup()
+            self._unsub_followup = None
+
+    def _create_task(self, coro: Coroutine[Any, Any, Any], name: str) -> None:
+        # Not eager: tasks created while polling must see the new self.data,
+        # which the coordinator assigns right after _async_update_data returns.
+        self.config_entry.async_create_background_task(
+            self.hass, coro, f"{DOMAIN} {self.login} {name}", eager_start=False
+        )
+
+    async def _async_save(self) -> None:
+        await self._store.async_save(self.stored.as_dict())
+
+    @callback
+    def _save_soon(self, delay: float = 1) -> None:
+        self._store.async_delay_save(self.stored.as_dict, delay)
+
+    async def _async_startup(self) -> None:
+        """Restore a persisted boost, then reconcile once if the device is known."""
+        stopped = False
+        async with self._op_lock:
+            boost = self.stored.boost
+            if boost is not None and boost.end is not None:
+                if boost.end <= dt_util.utcnow():
+                    _LOGGER.info("Boost ended while Home Assistant was stopped; stopping")
+                    if not await self.api.stop_charging():
+                        _LOGGER.warning("Could not stop charging after an expired boost")
+                    self.stored.boost = None
+                    await self._async_save()
+                    stopped = True
+                else:
+                    self._schedule_boost_expiry()
+            self._started = True
+            if self._device_known():
+                await self._async_startup_reconcile_locked()
+        self.async_update_listeners()
+        if stopped:
+            self._create_task(self._async_refresh_after_command(), "refresh")
+
+    async def _async_startup_reconcile(self) -> None:
+        async with self._op_lock:
+            await self._async_startup_reconcile_locked()
+        self.async_update_listeners()
+
+    async def _async_startup_reconcile_locked(self) -> None:
+        self._startup_pending = False
+        device = self._device_window()
+        if not self.stored.seeded:
+            # First run: take the user's current device settings as ours.
+            self.stored.seeded = True
+            if device is not None:
+                self.stored.night_enabled = True
+                self.stored.timer_start, self.stored.timer_end = device
+            else:
+                self.stored.night_enabled = False
+            self.stored.last_written = protocol.window_to_str(device)
+            _LOGGER.info(
+                "Initialized night timer from the charger: %s",
+                protocol.window_to_str(device) or "off",
+            )
+            await self._async_save()
+            return
+        if self.stored.last_written is None:
+            self.stored.last_written = protocol.window_to_str(device)
+        await self._async_reconcile_logged("startup")
+
+    # ------------------------------------------------------------------ #
+    # Polling
+    # ------------------------------------------------------------------ #
+
+    async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from the charger."""
         try:
             data = await self.api.get_state()
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"Error communicating with charger: {err}") from err
-
-        if data.get("status_text", "").startswith("error"):
-            raise UpdateFailed(f"Charger returned error: {data['status_text']}")
-
-        # Only sync target_amps from charger if user has NOT explicitly set it.
-        # This prevents the poll from overwriting what the user set on the slider.
-        if not self._user_set_amps:
-            charger_amps = data.get("current_amps")
-            if charger_amps is not None and charger_amps > 0:
-                self.target_amps = charger_amps
-                _LOGGER.debug("Synced target_amps from charger: %d A", charger_amps)
-
+        if not isinstance(data, dict):
+            raise UpdateFailed("Charger returned no data")
+        status = str(data.get("status_text") or "")
+        if status.startswith("error"):  # legacy offline-state dicts
+            raise UpdateFailed(f"Charger returned error: {status}")
+        self._process_status(data)
         return data
 
-    async def async_start_charging(self, amps: int) -> bool:
-        """Start charging at specified amperage with settle delay."""
-        amps = normalize_amps(amps)
-        if amps <= 0:
-            _LOGGER.warning("Cannot start charging with 0 amps")
+    @callback
+    def _process_status(self, data: dict[str, Any]) -> None:
+        """Derive engine state from a fresh status (no device writes here)."""
+        amps = data.get("current_amps")
+        if isinstance(amps, int) and protocol.normalize_amps(amps) > 0:
+            self._device_amps = protocol.normalize_amps(amps)
+        if not data.get("online", True):
+            return
+        status = data.get("status_text") or protocol.STATUS_UNKNOWN
+        if status not in _STATUSES_WITHOUT_INFO:
+            self._track_session(status, data.get("energy_kwh"))
+            self._check_after_start(status)
+            self._track_unlimited(status)
+        if not self._started or not data.get("timer_known", False):
+            return
+        if self._startup_pending:
+            self._startup_pending = False
+            self._create_task(self._async_startup_reconcile(), "startup reconcile")
+            return
+        if self._reconcile_retry and not self._op_lock.locked():
+            self._reconcile_retry = False
+            self._create_task(self._async_background_reconcile("retry"), "reconcile")
+            return
+        self._maybe_adopt(data.get("timer_window"))
+
+    @callback
+    def _track_session(self, status: str, energy: Any) -> None:
+        session = self.stored.session
+        energy_kwh = float(energy) if isinstance(energy, (int, float)) else None
+
+        def _accumulate() -> None:
+            if energy_kwh is None:
+                return
+            if session.last_energy is not None:
+                delta = energy_kwh - session.last_energy
+                if delta < 0:  # counter was reset ("Reset kWh") during the session
+                    delta = energy_kwh
+                session.kwh = round(session.kwh + delta, 3)
+            session.last_energy = energy_kwh
+
+        if status == protocol.STATUS_CHARGING:
+            if not session.active:
+                session.active = True
+                session.started_at = dt_util.utcnow()
+                session.kwh = 0.0
+                session.last_energy = energy_kwh
+                self._save_soon()
+            else:
+                _accumulate()
+                self._save_soon(SAVE_DELAY)
+        elif session.active:
+            _accumulate()
+            session.active = False
+            self._save_soon()
+
+    @callback
+    def _check_after_start(self, status: str) -> None:
+        if self._start_check_until is None:
+            return
+        if time.monotonic() > self._start_check_until:
+            self._start_check_until = None
+            return
+        if status == protocol.STATUS_CHARGING:
+            self.last_error = None
+            self._start_check_until = None
+        elif status == protocol.STATUS_CHARGING_BLOCKED and not self._blocked_warned:
+            self._blocked_warned = True
+            self.last_error = ERROR_CHARGING_BLOCKED
+            _LOGGER.warning(
+                "Charger %s reports charging blocked (status 4) after a start command",
+                self.login,
+            )
+
+    @callback
+    def _track_unlimited(self, status: str) -> None:
+        boost = self.stored.boost
+        if boost is None or not boost.unlimited or self._ending_boost:
+            return
+        if status == protocol.STATUS_CHARGING:
+            if not boost.charging_seen:
+                boost.charging_seen = True
+                self._save_soon()
+            return
+        reason: str | None = None
+        if boost.charging_seen:
+            reason = "charging finished"
+        elif (
+            boost.started_at is not None
+            and dt_util.utcnow() - boost.started_at > UNLIMITED_START_GRACE
+        ):
+            reason = "charging never started"
+        if reason is not None:
+            self._ending_boost = True
+            self._create_task(
+                self._async_end_boost(boost, stop=False, reason=reason), "end bypass"
+            )
+
+    @callback
+    def _maybe_adopt(self, device: protocol.Window | None) -> None:
+        """Adopt a window changed in the web panel (never fight the user)."""
+        if (
+            self.stored.boost is not None
+            or self._op_lock.locked()
+            or not self.stored.seeded
+        ):
+            return
+        if (
+            self._last_write_mono is not None
+            and time.monotonic() - self._last_write_mono < ADOPT_GRACE
+        ):
+            return
+        if self.stored.last_written is None:
+            self.stored.last_written = protocol.window_to_str(device)
+            self._save_soon()
+            return
+        if device == self.stored.last_written_window:
+            return
+        _LOGGER.info(
+            "Timer changed outside Home Assistant (%s -> %s); adopting it",
+            self.stored.last_written or "off",
+            protocol.window_to_str(device) or "off",
+        )
+        if device is None:
+            self.stored.night_enabled = False
+        else:
+            self.stored.night_enabled = True
+            self.stored.timer_start, self.stored.timer_end = device
+        self.stored.last_written = protocol.window_to_str(device)
+        self._save_soon()
+
+    # ------------------------------------------------------------------ #
+    # Derived state
+    # ------------------------------------------------------------------ #
+
+    @property
+    def target_amps(self) -> int:
+        """Current used for the next start (persisted user choice or device value)."""
+        if self.stored.charging_amps:
+            return self.stored.charging_amps
+        if self._device_amps:
+            return self._device_amps
+        return DEFAULT_CHARGING_AMPS
+
+    @target_amps.setter
+    def target_amps(self, amps: int) -> None:
+        normalized = protocol.normalize_amps(amps)
+        self.stored.charging_amps = normalized or None
+
+    @property
+    def is_charging(self) -> bool:
+        """True if the last status says charging."""
+        return bool(self.data) and self.data.get("status_text") == protocol.STATUS_CHARGING
+
+    @property
+    def boost(self) -> BoostState | None:
+        """Active boost, if any."""
+        return self.stored.boost
+
+    def _device_known(self) -> bool:
+        data = self.data
+        return bool(data) and bool(data.get("online", True)) and bool(
+            data.get("timer_known", False)
+        )
+
+    def _device_window(self) -> protocol.Window | None:
+        return (self.data or {}).get("timer_window")
+
+    def _best_known_window(self) -> protocol.Window | None:
+        """Device window if known, else what HA last wrote, else the desired one."""
+        if self._device_known():
+            return self._device_window()
+        if self.stored.last_written is not None:
+            return self.stored.last_written_window
+        return protocol.parse_window(self.stored.timer_start, self.stored.timer_end)
+
+    def desired_window(self, local_now: datetime | None = None) -> protocol.Window | None:
+        """Window the device should have now."""
+        return protocol.desired_window(
+            self.stored.night_enabled,
+            self.stored.timer_start,
+            self.stored.timer_end,
+            self.stored.boost is not None,
+            self.stored.weekend_free,
+            local_now or dt_util.now(),
+        )
+
+    def _timer_blocks_now(self) -> bool:
+        window = self._best_known_window()
+        if window is None:
             return False
-        _LOGGER.info("Starting charging at %d A", amps)
-        success = await self.api.start_charging(amps)
-        if success:
-            self.target_amps = amps
-            self._user_set_amps = True
-            await asyncio.sleep(COMMAND_SETTLE_DELAY)
-            await self.async_request_refresh()
-        return success
+        if (self.data or {}).get("status_text") == protocol.STATUS_CHARGING_BLOCKED:
+            return True
+        return not protocol.window_allows(window, dt_util.now())
 
-    async def async_stop_charging(self) -> bool:
-        """Stop charging and do multiple refreshes to update all sensors."""
-        _LOGGER.info("Stopping charging")
-        success = await self.api.stop_charging()
-        if success:
-            # Multiple refreshes so power/current/status all update promptly
-            for i in range(POST_STOP_REFRESHES):
-                await asyncio.sleep(COMMAND_SETTLE_DELAY if i == 0 else POST_STOP_INTERVAL)
-                _LOGGER.debug("Post-stop refresh %d/%d", i + 1, POST_STOP_REFRESHES)
-                await self.async_request_refresh()
-        return success
+    # ------------------------------------------------------------------ #
+    # Timer writes
+    # ------------------------------------------------------------------ #
 
-    async def async_reset_energy(self) -> bool:
-        """Reset the charger's consumed-energy counter and refresh."""
-        _LOGGER.info("Resetting energy counter")
-        success = await self.api.reset_energy()
-        if success:
-            await asyncio.sleep(COMMAND_SETTLE_DELAY)
-            await self.async_request_refresh()
-        return success
-
-    async def async_set_amps(self, amps: int) -> bool:
-        """Set target amperage.
-
-        Always stores the value (so slider keeps it).
-        Only sends command to charger if currently charging.
-        """
-        amps = normalize_amps(amps)
-        if amps <= 0:
-            _LOGGER.warning("Invalid amperage: %d", amps)
+    async def _async_write_window_locked(
+        self, window: protocol.Window | None, reason: str
+    ) -> bool:
+        now = dt_util.now()
+        if window is None:
+            ok = await self.api.disable_timer(now)
+        else:
+            ok = await self.api.set_timer(window[0], window[1], now)
+        if not ok:
             return False
+        self._last_write_mono = time.monotonic()
+        self.stored.last_written = protocol.window_to_str(window)
+        await self._async_save()
+        if self.data is not None:
+            self.data = {
+                **self.data,
+                "timer_window": window,
+                "timer_start": window[0] if window else protocol.DISABLED_TIME,
+                "timer_end": window[1] if window else protocol.DISABLED_TIME,
+            }
+        _LOGGER.info(
+            "Timer written (%s): %s", reason, protocol.window_to_str(window) or "off"
+        )
+        return True
 
-        old_amps = self.target_amps
-        self.target_amps = amps
-        self._user_set_amps = True  # lock: don't overwrite with charger poll
-        _LOGGER.info("Target amps set to %d A (was %d A)", amps, old_amps)
+    async def _async_reconcile_locked(self, reason: str) -> bool:
+        """Write the desired window if the device differs. False if a write failed."""
+        desired = self.desired_window()
+        if self._device_known() and self._device_window() == desired:
+            encoded = protocol.window_to_str(desired)
+            if self.stored.last_written != encoded:
+                self.stored.last_written = encoded
+                self._save_soon()
+            return True
+        ok = await self._async_write_window_locked(desired, reason)
+        if not ok:
+            self._reconcile_retry = True
+        return ok
 
-        # Notify HA that the number entity value changed immediately
+    async def _async_reconcile_logged(self, reason: str) -> None:
+        if not await self._async_reconcile_locked(reason):
+            _LOGGER.warning("Could not update the charger timer (%s); will retry", reason)
+
+    async def _async_background_reconcile(self, reason: str) -> None:
+        async with self._op_lock:
+            if self.stored.seeded:
+                await self._async_reconcile_logged(reason)
         self.async_update_listeners()
 
-        # Only send command to charger if it's currently charging
-        if self.data and self.data.get("status_text") == "charging":
-            _LOGGER.info("Charger is active, updating amps to %d A", amps)
-            success = await self.api.start_charging(amps)
-            if success:
-                await asyncio.sleep(COMMAND_SETTLE_DELAY)
-                await self.async_request_refresh()
-            return success
+    @callback
+    def _handle_daily(self, _now: datetime) -> None:
+        """00:00:05 local: weekend boundary (weekend_free) and general check."""
+        if self._started and not self._startup_pending:
+            self._create_task(self._async_background_reconcile("daily"), "daily reconcile")
 
-        # Not charging — value stored, will be used on next turn_on
-        return True
+    async def _async_apply_settings_locked(self, reason: str) -> None:
+        self.stored.seeded = True
+        await self._async_save()
+        self.async_update_listeners()
+        if not await self._async_reconcile_locked(reason):
+            raise _command_failed("timer")
+
+    # ------------------------------------------------------------------ #
+    # Boost scheduling
+    # ------------------------------------------------------------------ #
+
+    @callback
+    def _cancel_boost_timer(self) -> None:
+        if self._unsub_boost is not None:
+            self._unsub_boost()
+            self._unsub_boost = None
+
+    @callback
+    def _schedule_boost_expiry(self) -> None:
+        self._cancel_boost_timer()
+        boost = self.stored.boost
+        if boost is None or boost.end is None:
+            return
+        self._unsub_boost = async_track_point_in_utc_time(
+            self.hass, self._handle_boost_expired, boost.end
+        )
+
+    @callback
+    def _handle_boost_expired(self, _now: datetime) -> None:
+        self._unsub_boost = None
+        boost = self.stored.boost
+        if boost is None:
+            return
+        self._create_task(
+            self._async_end_boost(boost, stop=True, reason="boost expired"), "boost expiry"
+        )
+
+    async def _async_end_boost(self, expected: BoostState, *, stop: bool, reason: str) -> None:
+        async with self._op_lock:
+            self._ending_boost = False
+            boost = self.stored.boost
+            if boost is not expected:
+                return
+            if (
+                boost.end is not None
+                and stop
+                and boost.end > dt_util.utcnow() + timedelta(seconds=1)
+            ):
+                # Extended meanwhile; the new expiry is already scheduled.
+                return
+            _LOGGER.info("Ending boost: %s", reason)
+            if stop and not await self.api.stop_charging():
+                _LOGGER.warning("Could not stop charging at the end of the boost")
+            self._cancel_boost_timer()
+            self.stored.boost = None
+            await self._async_save()
+            await self._async_reconcile_logged(reason)
+        self.async_update_listeners()
+        self._create_task(self._async_refresh_after_command(), "refresh")
+
+    @callback
+    def _arm_start_check(self) -> None:
+        self.last_error = None
+        self._blocked_warned = False
+        self._start_check_until = time.monotonic() + START_CHECK_WINDOW
+
+    async def _async_refresh_after_command(self) -> None:
+        await asyncio.sleep(COMMAND_SETTLE_DELAY)
+        await self.async_refresh()
+        if self._unsub_followup is not None:
+            self._unsub_followup()
+        self._unsub_followup = async_call_later(
+            self.hass, FOLLOWUP_REFRESH_DELAY, self._handle_followup
+        )
+
+    @callback
+    def _handle_followup(self, _now: datetime) -> None:
+        self._unsub_followup = None
+        self._create_task(self.async_request_refresh(), "followup refresh")
+
+    def _after_command(self) -> None:
+        self.async_update_listeners()
+        self._create_task(self._async_refresh_after_command(), "refresh")
+
+    # ------------------------------------------------------------------ #
+    # User actions (entities and services)
+    # ------------------------------------------------------------------ #
+
+    async def async_charge_for(self, minutes: int, amps: int | None = None) -> None:
+        """Charge now for ``minutes``, bypassing the device timer."""
+        minutes = int(minutes)
+        if minutes <= 0:
+            raise HomeAssistantError("minutes must be positive")
+        if amps is not None:
+            normalized = protocol.normalize_amps(amps)
+            if normalized <= 0:
+                raise HomeAssistantError(f"unsupported current: {amps}")
+            self.stored.charging_amps = normalized
+        start_amps = self.target_amps
+        async with self._op_lock:
+            previous = self.stored.boost
+            restore = previous.restore if previous is not None else False
+            if self._best_known_window() is not None:
+                if not await self._async_write_window_locked(None, "boost"):
+                    raise _command_failed("timer")
+                restore = True
+                await asyncio.sleep(TIMER_SETTLE_DELAY)
+            if not await self.api.start_charging(start_amps):
+                if previous is None:
+                    await self._async_reconcile_logged("boost start failed")
+                raise _command_failed("start")
+            now = dt_util.utcnow()
+            self._cancel_boost_timer()
+            self.stored.boost = BoostState(
+                end=now + timedelta(minutes=minutes),
+                unlimited=False,
+                minutes=minutes,
+                restore=restore,
+                started_at=now,
+            )
+            self.stored.seeded = True
+            await self._async_save()
+            self._schedule_boost_expiry()
+            self._arm_start_check()
+            _LOGGER.info("Boost started: %d min at %d A", minutes, start_amps)
+        self._after_command()
+
+    async def async_extend_charge(self, minutes: int) -> None:
+        """Add ``minutes`` to the active timed boost, or start one."""
+        minutes = int(minutes)
+        if minutes <= 0:
+            raise HomeAssistantError("minutes must be positive")
+        async with self._op_lock:
+            boost = self.stored.boost
+            if boost is not None and not boost.unlimited and boost.end is not None:
+                boost.end = max(boost.end, dt_util.utcnow()) + timedelta(minutes=minutes)
+                boost.minutes += minutes
+                await self._async_save()
+                self._schedule_boost_expiry()
+                _LOGGER.info("Boost extended by %d min (until %s)", minutes, boost.end)
+                extended = True
+            else:
+                extended = False
+        if extended:
+            self.async_update_listeners()
+            return
+        await self.async_charge_for(minutes)
+
+    async def async_stop_charging(self) -> None:
+        """Stop charging, cancel any boost and restore the timer."""
+        async with self._op_lock:
+            if not await self.api.stop_charging():
+                raise _command_failed("stop")
+            self._cancel_boost_timer()
+            self._start_check_until = None
+            if self.stored.boost is not None:
+                self.stored.boost = None
+                await self._async_save()
+            if self.stored.seeded:
+                await self._async_reconcile_logged("stop")
+        self._after_command()
+
+    async def async_start_charging(self, amps: int | None = None) -> None:
+        """Start charging now (switch.charging on).
+
+        If the night timer currently blocks charging this becomes an unlimited
+        bypass: timer disabled until charging stops. ``amps`` (optional) also
+        becomes the stored charging current.
+        """
+        if amps is not None:
+            if protocol.normalize_amps(amps) <= 0:
+                raise HomeAssistantError(f"unsupported current: {amps}")
+            self.target_amps = amps
+        amps = self.target_amps
+        async with self._op_lock:
+            if self.stored.boost is None and self._timer_blocks_now():
+                if not await self._async_write_window_locked(None, "manual charge"):
+                    raise _command_failed("timer")
+                await asyncio.sleep(TIMER_SETTLE_DELAY)
+                if not await self.api.start_charging(amps):
+                    await self._async_reconcile_logged("manual charge failed")
+                    raise _command_failed("start")
+                self.stored.boost = BoostState(
+                    end=None,
+                    unlimited=True,
+                    minutes=0,
+                    restore=True,
+                    started_at=dt_util.utcnow(),
+                )
+                self.stored.seeded = True
+                await self._async_save()
+                _LOGGER.info("Manual charge at %d A bypasses the night timer", amps)
+            elif not await self.api.start_charging(amps):
+                raise _command_failed("start")
+            self._arm_start_check()
+        self._after_command()
+
+    async def async_set_target_amps(self, amps: int) -> None:
+        """Set the charging current; applied immediately while charging."""
+        normalized = protocol.normalize_amps(amps)
+        if normalized <= 0:
+            raise HomeAssistantError(f"unsupported current: {amps}")
+        self.stored.charging_amps = normalized
+        await self._async_save()
+        self.async_update_listeners()
+        if self.is_charging:
+            async with self._op_lock:
+                if not await self.api.start_charging(normalized):
+                    raise _command_failed("start")
+            self._after_command()
+
+    async_set_amps = async_set_target_amps  # pre-2.0 name
+
+    async def async_set_boost_minutes(self, minutes: int) -> None:
+        """Set the default boost duration (button.boost)."""
+        minutes = int(minutes)
+        self.stored.boost_minutes = min(MAX_BOOST_MINUTES, max(MIN_BOOST_MINUTES, minutes))
+        await self._async_save()
+        self.async_update_listeners()
+
+    async def async_boost(self) -> None:
+        """Charge now for the configured boost duration."""
+        await self.async_charge_for(self.stored.boost_minutes)
+
+    async def async_set_night_enabled(self, enabled: bool) -> None:
+        """Enable/disable the device's daily window."""
+        async with self._op_lock:
+            self.stored.night_enabled = bool(enabled)
+            await self._async_apply_settings_locked("night timer")
+
+    async def async_set_weekend_free(self, enabled: bool) -> None:
+        """Allow charging any time on Saturday and Sunday."""
+        async with self._op_lock:
+            self.stored.weekend_free = bool(enabled)
+            await self._async_apply_settings_locked("weekend free")
+
+    async def async_set_timer(
+        self,
+        start: Any = None,
+        end: Any = None,
+        enabled: bool | None = None,
+    ) -> None:
+        """Change the night window times and/or whether it is enabled."""
+        new_start = protocol.parse_hhmm(start) if start is not None else None
+        new_end = protocol.parse_hhmm(end) if end is not None else None
+        async with self._op_lock:
+            if new_start is not None:
+                self.stored.timer_start = new_start
+            if new_end is not None:
+                self.stored.timer_end = new_end
+            if enabled is not None:
+                self.stored.night_enabled = bool(enabled)
+            await self._async_apply_settings_locked("set timer")
+
+    async def async_reset_energy(self) -> None:
+        """Reset the charger's consumed-energy counter."""
+        async with self._op_lock:
+            if not await self.api.reset_energy():
+                raise _command_failed("resetkwt")
+        self._after_command()
+
+    # ------------------------------------------------------------------ #
+    # Values for entities
+    # ------------------------------------------------------------------ #
+
+    @property
+    def session_energy(self) -> float | None:
+        """kWh of the current/last session (falls back to the device history)."""
+        session = self.stored.session
+        if session.started_at is not None:
+            return round(session.kwh, 3)
+        history = (self.data or {}).get("history") or []
+        if history:
+            return history[0].get("kwh")
+        return None
+
+
+def _command_failed(command: str) -> HomeAssistantError:
+    return HomeAssistantError(
+        translation_domain=DOMAIN,
+        translation_key="command_failed",
+        translation_placeholders={"command": command},
+    )

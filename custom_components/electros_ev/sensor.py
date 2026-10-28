@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -16,10 +19,10 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_CHARGER_LOGIN, DOMAIN, STATUS_TEXT
+from . import protocol
 from .coordinator import ElectroSCoordinator
+from .entity import ElectroSEntity, ElectroSSettingEntity
 
 
 async def async_setup_entry(
@@ -29,177 +32,230 @@ async def async_setup_entry(
 ) -> None:
     """Set up ElectroS sensors."""
     coordinator: ElectroSCoordinator = entry.runtime_data
-    login = entry.data[CONF_CHARGER_LOGIN]
-
-    entities = [
-        ElectroSStatusSensor(coordinator, entry, login),
-        ElectroSCurrentAmpsSensor(coordinator, entry, login),
-        ElectroSMeasuredCurrentSensor(coordinator, entry, login),
-        ElectroSVoltageSensor(coordinator, entry, login),
-        ElectroSPowerSensor(coordinator, entry, login),
-        ElectroSEnergySensor(coordinator, entry, login),
-    ]
-    async_add_entities(entities)
-
-
-class ElectroSBaseSensor(CoordinatorEntity[ElectroSCoordinator], SensorEntity):
-    """Base sensor for ElectroS charger."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        coordinator: ElectroSCoordinator,
-        entry: ConfigEntry,
-        login: str,
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._login = login
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, login)},
-            "name": f"ElectroS {login}",
-            "manufacturer": "ElectroS",
-            "model": "EV Charger",
-        }
+    async_add_entities(
+        [
+            ElectroSStatusSensor(coordinator),
+            ElectroSConfiguredCurrentSensor(coordinator),
+            ElectroSMeasuredCurrentSensor(coordinator),
+            ElectroSVoltageSensor(coordinator),
+            ElectroSPowerSensor(coordinator),
+            ElectroSEnergySensor(coordinator),
+            ElectroSSessionEnergySensor(coordinator),
+            ElectroSMonthEnergySensor(coordinator),
+            ElectroSBoostEndSensor(coordinator),
+        ]
+    )
 
 
-class ElectroSStatusSensor(ElectroSBaseSensor):
-    """Sensor for charger status."""
+class _DataSensor(ElectroSEntity, SensorEntity):
+    """Sensor reading one key of the coordinator data."""
 
-    _attr_name = "Статус"
+    _data_key: str
+
+    @property
+    def native_value(self) -> Any:
+        """Return the value from the last status."""
+        if not self.coordinator.data:
+            return None
+        return self.coordinator.data.get(self._data_key)
+
+
+class ElectroSStatusSensor(_DataSensor):
+    """Charger status (enum)."""
+
     _attr_icon = "mdi:ev-station"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(protocol.STATUS_OPTIONS)
+    _unrecorded_attributes = frozenset({"events"})
 
-    def __init__(self, coordinator, entry, login) -> None:
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
         """Initialize."""
-        super().__init__(coordinator, entry, login)
-        self._attr_unique_id = f"{login}_status"
+        super().__init__(coordinator, "status", "status")
 
     @property
     def native_value(self) -> str | None:
-        """Return the status."""
-        if self.coordinator.data is None:
+        """Return the status key."""
+        if not self.coordinator.data:
             return None
-        code = self.coordinator.data.get("status_code")
-        return STATUS_TEXT.get(code, self.coordinator.data.get("status_text", "unknown"))
+        value = self.coordinator.data.get("status_text")
+        return value if value in protocol.STATUS_OPTIONS else protocol.STATUS_UNKNOWN
 
     @property
-    def extra_state_attributes(self) -> dict:
-        """Return extra attributes."""
-        if self.coordinator.data is None:
-            return {}
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Raw code and the device event log."""
+        data = self.coordinator.data or {}
         return {
-            "online": self.coordinator.data.get("online"),
-            "status_code": self.coordinator.data.get("status_code"),
-            "status_text_en": self.coordinator.data.get("status_text"),
+            "status_code": data.get("status_code"),
+            "online": data.get("online"),
+            "device_time": data.get("device_time"),
+            "events": data.get("events") or [],
         }
 
 
-class ElectroSCurrentAmpsSensor(ElectroSBaseSensor):
-    """Sensor for configured charging current."""
+class ElectroSConfiguredCurrentSensor(_DataSensor):
+    """Charging current configured on the charger (field 7)."""
 
-    _attr_name = "Налаштований струм"
-    _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
-    _attr_device_class = SensorDeviceClass.CURRENT
-    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:current-ac"
-
-    def __init__(self, coordinator, entry, login) -> None:
-        """Initialize."""
-        super().__init__(coordinator, entry, login)
-        self._attr_unique_id = f"{login}_current_amps"
-
-    @property
-    def native_value(self) -> int | None:
-        """Return configured amps."""
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("current_amps")
-
-
-class ElectroSMeasuredCurrentSensor(ElectroSBaseSensor):
-    """Sensor for measured charging current."""
-
-    _attr_name = "Виміряний струм"
     _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
     _attr_device_class = SensorDeviceClass.CURRENT
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:flash"
+    _data_key = "current_amps"
 
-    def __init__(self, coordinator, entry, login) -> None:
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
         """Initialize."""
-        super().__init__(coordinator, entry, login)
-        self._attr_unique_id = f"{login}_measured_current"
-
-    @property
-    def native_value(self) -> float | None:
-        """Return measured current."""
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("measured_current")
+        super().__init__(coordinator, "configured_current", "current_amps")
 
 
-class ElectroSVoltageSensor(ElectroSBaseSensor):
-    """Sensor for mains voltage."""
+class ElectroSMeasuredCurrentSensor(_DataSensor):
+    """Measured charging current (field 9)."""
 
-    _attr_name = "Напруга мережі"
+    _attr_icon = "mdi:flash"
+    _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+    _attr_device_class = SensorDeviceClass.CURRENT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+    _data_key = "measured_current"
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "measured_current", "measured_current")
+
+
+class ElectroSVoltageSensor(_DataSensor):
+    """Current mains voltage (field 10) with min/max/avg attributes."""
+
+    _attr_icon = "mdi:flash-outline"
     _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
     _attr_device_class = SensorDeviceClass.VOLTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:flash-outline"
+    _data_key = "mains_voltage"
 
-    def __init__(self, coordinator, entry, login) -> None:
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
         """Initialize."""
-        super().__init__(coordinator, entry, login)
-        self._attr_unique_id = f"{login}_mains_voltage"
+        super().__init__(coordinator, "voltage", "mains_voltage")
 
     @property
-    def native_value(self) -> int | None:
-        """Return mains voltage."""
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("mains_voltage")
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Min (17), max (16), average (20)."""
+        data = self.coordinator.data or {}
+        return {
+            "min": data.get("voltage_min"),
+            "max": data.get("voltage_max"),
+            "avg": data.get("voltage_avg"),
+        }
 
 
-class ElectroSPowerSensor(ElectroSBaseSensor):
-    """Sensor for charging power."""
+class ElectroSPowerSensor(_DataSensor):
+    """Charging power reported by the charger (field 12)."""
 
-    _attr_name = "Потужність зарядки"
+    _attr_icon = "mdi:lightning-bolt"
     _attr_native_unit_of_measurement = UnitOfPower.WATT
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:lightning-bolt"
+    _data_key = "charging_power_w"
 
-    def __init__(self, coordinator, entry, login) -> None:
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
         """Initialize."""
-        super().__init__(coordinator, entry, login)
-        self._attr_unique_id = f"{login}_charging_power"
-
-    @property
-    def native_value(self) -> float | None:
-        """Return charging power."""
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("charging_power_w")
+        super().__init__(coordinator, "power", "charging_power")
 
 
-class ElectroSEnergySensor(ElectroSBaseSensor):
-    """Sensor for consumed energy (resettable counter, usable in the Energy dashboard)."""
+class ElectroSEnergySensor(_DataSensor):
+    """Energy since the last "Reset kWh" (field 11), usable in the Energy dashboard."""
 
-    _attr_name = "Спожита енергія"
+    _attr_icon = "mdi:counter"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
-    _attr_icon = "mdi:counter"
+    _attr_suggested_display_precision = 2
+    _data_key = "energy_kwh"
 
-    def __init__(self, coordinator, entry, login) -> None:
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
         """Initialize."""
-        super().__init__(coordinator, entry, login)
-        self._attr_unique_id = f"{login}_energy"
+        super().__init__(coordinator, "energy", "energy")
+
+
+class ElectroSSessionEnergySensor(ElectroSEntity, SensorEntity):
+    """Energy of the current/last charging session; device history as attribute."""
+
+    _attr_icon = "mdi:car-electric"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 2
+    _unrecorded_attributes = frozenset({"history"})
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "session_energy")
 
     @property
     def native_value(self) -> float | None:
-        """Return consumed energy."""
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("energy_kwh")
+        """kWh of the current/last session."""
+        return self.coordinator.session_energy
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Session start and the device's session history (newest first)."""
+        started = self.coordinator.stored.session.started_at
+        return {
+            "started_at": started.isoformat() if started else None,
+            "history": list((self.coordinator.data or {}).get("history") or []),
+        }
+
+
+class ElectroSMonthEnergySensor(ElectroSEntity, SensorEntity):
+    """Energy of the current month (field 31)."""
+
+    _attr_icon = "mdi:calendar-month"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "month_energy")
+
+    @property
+    def native_value(self) -> float | None:
+        """kWh of the current month."""
+        data = self.coordinator.data or {}
+        return protocol.month_energy(data.get("current_month"), data.get("months"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """All 12 months (Jan..Dec, kWh) and the current month number."""
+        data = self.coordinator.data or {}
+        months = data.get("months")
+        return {
+            "months": list(months) if months else None,
+            "current_month": data.get("current_month"),
+        }
+
+
+class ElectroSBoostEndSensor(ElectroSSettingEntity, SensorEntity):
+    """When the current timed boost ends (None when no timed boost is active)."""
+
+    _attr_icon = "mdi:timer-outline"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "boost_end")
+
+    @property
+    def native_value(self) -> datetime | None:
+        """End of the timed boost."""
+        boost = self.coordinator.boost
+        return boost.end if boost is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Boost details and the last start problem."""
+        boost = self.coordinator.boost
+        return {
+            "active": boost is not None,
+            "unlimited": bool(boost and boost.unlimited),
+            "minutes": boost.minutes if boost is not None else 0,
+            "last_error": self.coordinator.last_error,
+        }

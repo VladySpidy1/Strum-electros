@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_CHARGER_LOGIN, DOMAIN
+from . import protocol
 from .coordinator import ElectroSCoordinator
+from .entity import ElectroSEntity, ElectroSSettingEntity
 
 _LOGGER = logging.getLogger(__name__)
-
-# Statuses that mean the charger is actively charging or trying to charge
-_CHARGING_STATUSES = {"charging"}
 
 
 async def async_setup_entry(
@@ -26,51 +24,93 @@ async def async_setup_entry(
 ) -> None:
     """Set up ElectroS switches."""
     coordinator: ElectroSCoordinator = entry.runtime_data
-    login = entry.data[CONF_CHARGER_LOGIN]
+    async_add_entities(
+        [
+            ElectroSChargingSwitch(coordinator),
+            ElectroSNightTimerSwitch(coordinator),
+            ElectroSWeekendFreeSwitch(coordinator),
+        ]
+    )
 
-    async_add_entities([ElectroSChargingSwitch(coordinator, entry, login)])
 
+class ElectroSChargingSwitch(ElectroSEntity, SwitchEntity):
+    """On = charging. On starts now (bypassing a blocking timer), off stops."""
 
-class ElectroSChargingSwitch(CoordinatorEntity[ElectroSCoordinator], SwitchEntity):
-    """Switch to start/stop charging."""
-
-    _attr_has_entity_name = True
-    _attr_name = "Зарядка"
     _attr_icon = "mdi:ev-station"
     _attr_device_class = SwitchDeviceClass.SWITCH
 
-    def __init__(
-        self,
-        coordinator: ElectroSCoordinator,
-        entry: ConfigEntry,
-        login: str,
-    ) -> None:
-        """Initialize the switch."""
-        super().__init__(coordinator)
-        self._login = login
-        self._attr_unique_id = f"{login}_charging_switch"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, login)},
-            "name": f"ElectroS {login}",
-            "manufacturer": "ElectroS",
-            "model": "EV Charger",
-        }
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "charging", "charging_switch")
 
     @property
     def is_on(self) -> bool | None:
         """Return true if charging."""
-        if self.coordinator.data is None:
+        if not self.coordinator.data:
             return None
-        status = self.coordinator.data.get("status_text")
-        return status in _CHARGING_STATUSES
+        return self.coordinator.data.get("status_text") == protocol.STATUS_CHARGING
 
-    async def async_turn_on(self, **kwargs) -> None:
-        """Start charging at the target amperage from coordinator."""
-        amps = self.coordinator.target_amps
-        _LOGGER.info("Turn ON requested, starting at %d A", amps)
-        await self.coordinator.async_start_charging(amps)
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Start charging with the configured current."""
+        _LOGGER.info("Turn ON requested (%d A)", self.coordinator.target_amps)
+        await self.coordinator.async_start_charging()
 
-    async def async_turn_off(self, **kwargs) -> None:
-        """Stop charging."""
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop charging, cancel any boost, restore the timer."""
         _LOGGER.info("Turn OFF requested")
         await self.coordinator.async_stop_charging()
+
+
+class ElectroSNightTimerSwitch(ElectroSSettingEntity, SwitchEntity):
+    """Whether the charger's daily window (timer_start..timer_end) is enabled."""
+
+    _attr_icon = "mdi:weather-night"
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "night_timer")
+
+    @property
+    def is_on(self) -> bool:
+        """Night timer enabled in HA."""
+        return self.coordinator.stored.night_enabled
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Window currently on the device (None = disabled or unknown)."""
+        data = self.coordinator.data or {}
+        window = data.get("timer_window") if data.get("timer_known") else None
+        return {
+            "device_window": protocol.window_to_str(window) or None,
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable."""
+        await self.coordinator.async_set_night_enabled(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable."""
+        await self.coordinator.async_set_night_enabled(False)
+
+
+class ElectroSWeekendFreeSwitch(ElectroSSettingEntity, SwitchEntity):
+    """When on, the device timer is disabled on Saturday and Sunday."""
+
+    _attr_icon = "mdi:calendar-weekend"
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "weekend_free")
+
+    @property
+    def is_on(self) -> bool:
+        """Weekend free enabled."""
+        return self.coordinator.stored.weekend_free
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable."""
+        await self.coordinator.async_set_weekend_free(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable."""
+        await self.coordinator.async_set_weekend_free(False)

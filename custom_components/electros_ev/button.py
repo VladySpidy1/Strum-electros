@@ -9,10 +9,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_CHARGER_LOGIN, DOMAIN
 from .coordinator import ElectroSCoordinator
+from .entity import ElectroSEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,35 +23,38 @@ async def async_setup_entry(
 ) -> None:
     """Set up ElectroS buttons."""
     coordinator: ElectroSCoordinator = entry.runtime_data
-    login = entry.data[CONF_CHARGER_LOGIN]
+    async_add_entities(
+        [
+            ElectroSBoostButton(coordinator),
+            ElectroSResetEnergyButton(coordinator),
+        ]
+    )
 
-    async_add_entities([ElectroSResetEnergyButton(coordinator, entry, login)])
+
+class ElectroSBoostButton(ElectroSEntity, ButtonEntity):
+    """Charge now for number.boost_minutes."""
+
+    _attr_icon = "mdi:rocket-launch-outline"
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "boost")
+
+    async def async_press(self) -> None:
+        """Start the boost."""
+        _LOGGER.info("Boost requested (%d min)", self.coordinator.stored.boost_minutes)
+        await self.coordinator.async_boost()
 
 
-class ElectroSResetEnergyButton(CoordinatorEntity[ElectroSCoordinator], ButtonEntity):
-    """Button to reset the consumed-energy (kWh) counter."""
+class ElectroSResetEnergyButton(ElectroSEntity, ButtonEntity):
+    """Reset the consumed-energy (kWh) counter."""
 
-    _attr_has_entity_name = True
-    _attr_name = "Скинути кВт·год"
     _attr_icon = "mdi:counter"
     _attr_entity_category = EntityCategory.CONFIG
 
-    def __init__(
-        self,
-        coordinator: ElectroSCoordinator,
-        entry: ConfigEntry,
-        login: str,
-    ) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator)
-        self._login = login
-        self._attr_unique_id = f"{login}_reset_energy"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, login)},
-            "name": f"ElectroS {login}",
-            "manufacturer": "ElectroS",
-            "model": "EV Charger",
-        }
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "reset_energy", "reset_energy")
 
     async def async_press(self) -> None:
         """Reset the energy counter."""

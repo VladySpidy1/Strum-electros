@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ElectroS card preview</title>
+<!--
+  Static preview of custom_components/electros_ev/frontend/electros-card.js with a mock hass.
+  Works from file:// and from `python -m http.server` in the repo root (open /dev/card-preview.html).
+  Query params: ?now=21:18 (default; "real" = real clock) · ?lang=uk|ru|en · ?theme=auto|light|dark (force all)
+  No network: no fonts, no CDN, the mock never leaves the page.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #2b2c31; color: #e6e6ea; font: 14px/1.4 -apple-system, "SF Pro Text", Inter, system-ui, sans-serif; }
+  header.bar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center;
+    padding: 10px 20px; background: rgba(20,21,24,.92); border-bottom: 1px solid #3a3b41; backdrop-filter: blur(12px); }
+  header.bar h1 { margin: 0; font-size: 16px; font-weight: 700; }
+  header.bar label { display: inline-flex; gap: 6px; align-items: center; color: #b9bac2; }
+  header.bar select, header.bar input { font: inherit; background: #1d1e22; color: #e6e6ea; border: 1px solid #44454c; border-radius: 8px; padding: 4px 8px; }
+  header.bar .clock { font-variant-numeric: tabular-nums; color: #9fe8b4; }
+  main { padding: 20px; display: flex; flex-direction: column; gap: 32px; }
+  h2.sec { margin: 0 0 12px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #9a9ba4; font-weight: 600; }
+  .grid { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+  figure { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+  figcaption { font-size: 12px; color: #a6a7af; }
+  figcaption code { color: #d6d7de; }
+  .card-w { width: 390px; max-width: calc(100vw - 40px); }
+  .row { position: relative; overflow: hidden; display: flex; flex-wrap: wrap; gap: 24px; align-items: center; padding: 30px 40px; border-radius: 24px; }
+  .row.dark { background: #07090C; }
+  .row.light { background: #F2F2F7; }
+  .row.dark::before, .row.light::before { content: ""; position: absolute; left: 40px; top: -120px; width: 560px; height: 420px; pointer-events: none; }
+  .row.dark::before { background: radial-gradient(closest-side, rgba(48,209,88,.28), transparent 72%); }
+  .row.light::before { background: radial-gradient(closest-side, rgba(88,86,214,.16), transparent 72%); }
+  .row.dark figcaption { color: #8e8f97; }
+  .row.light figcaption { color: #6c6d75; }
+  .tile-s { width: 170px; height: 170px; }
+  .tile-m { width: 360px; height: 170px; }
+  .row figure { position: relative; }
+  #log { margin: 0; padding: 12px 16px 12px 36px; background: #1d1e22; border: 1px solid #3a3b41; border-radius: 14px; max-height: 280px; overflow: auto;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfd0d6; }
+  #log li.note { color: #f5c46b; }
+  #log li.ev { color: #8fc3ff; }
+  .empty-log { color: #777; }
+</style>
+<script src="mock-hass.js"></script>
+<script>
+  (function () {
+    var p = new URLSearchParams(location.search);
+    var now = p.get('now') || '21:18';
+    if (now !== 'real') ElectrosMock.installFakeNow(now);
+  })();
+</script>
+<script src="../custom_components/electros_ev/frontend/electros-card.js"></script>
+</head>
+<body>
+<header class="bar">
+  <h1>ElectroS card preview</h1>
+  <label>Мова <select id="lang"><option value="uk">uk</option><option value="ru">ru</option><option value="en">en</option></select></label>
+  <label>Тема <select id="theme"><option value="">як у дизайні</option><option value="auto">auto (hass dark)</option><option value="dark">усі темні</option><option value="light">усі світлі</option></select></label>
+  <label>Час <select id="now"><option value="21:18">21:18 (як у макеті)</option><option value="23:40">23:40 (у вікні)</option><option value="06:50">06:50</option><option value="real">реальний</option></select></label>
+  <span class="clock" id="clock"></span>
+  <span id="status" style="color:#ff8a80"></span>
+</header>
+<main>
+  <section>
+    <h2 class="sec">Повна картка · electros-card</h2>
+    <div class="grid" id="cards"></div>
+  </section>
+  <section>
+    <h2 class="sec">Плитки · electros-tile · темна</h2>
+    <div class="row dark" id="tiles-dark"></div>
+  </section>
+  <section>
+    <h2 class="sec">Плитки · electros-tile · світла</h2>
+    <div class="row light" id="tiles-light"></div>
+  </section>
+  <section>
+    <h2 class="sec">Плитки · інші стани</h2>
+    <div class="grid" id="tiles-other"></div>
+  </section>
+  <section>
+    <h2 class="sec">Порожні стани</h2>
+    <div class="grid" id="empty"></div>
+  </section>
+  <section>
+    <h2 class="sec">Виклики сервісів (mock)</h2>
+    <ol id="log"><li class="empty-log">Натисніть щось у картці…</li></ol>
+  </section>
+</main>
+<script>
+(function () {
+  'use strict';
+  var params = new URLSearchParams(location.search);
+  var lang = params.get('lang') || 'uk';
+  var forceTheme = params.get('theme') || '';
+  var nowParam = params.get('now') || '21:18';
+
+  function bindSelect(id, value, key) {
+    var el = document.getElementById(id);
+    el.value = value;
+    el.addEventListener('change', function () {
+      var q = new URLSearchParams(location.search);
+      if (el.value) q.set(key, el.value); else q.delete(key);
+      location.search = q.toString();
+    });
+  }
+  bindSelect('lang', lang, 'lang');
+  bindSelect('theme', forceTheme, 'theme');
+  bindSelect('now', nowParam, 'now');
+
+  if (!customElements.get('electros-card') || !customElements.get('electros-tile')) {
+    document.getElementById('status').textContent = 'electros-card.js не завантажився — перевірте шлях ../custom_components/electros_ev/frontend/electros-card.js';
+    return;
+  }
+
+  var DEVICES = [
+    { id: 'dev_charging', login: '10001', scenario: 'charging' },
+    { id: 'dev_idle', login: '10002', scenario: 'idle_night' },
+    { id: 'dev_waiting', login: '10003', scenario: 'waiting_vehicle' },
+    { id: 'dev_blocked', login: '10004', scenario: 'blocked' },
+    { id: 'dev_fault', login: '10005', scenario: 'fault' },
+    { id: 'dev_offline', login: '10006', scenario: 'offline' },
+    { id: 'dev_unlimited', login: '10007', scenario: 'unlimited', area_id: null, name_by_user: 'Tesla <b>не HTML</b>' },
+  ];
+  var mock = ElectrosMock.createMock({ lang: lang, darkMode: true, devices: DEVICES, latency: 350 });
+  var elements = [];
+
+  function theme(t) { return forceTheme || t; }
+
+  function add(container, tag, config, caption, cls) {
+    var fig = document.createElement('figure');
+    var cap = document.createElement('figcaption');
+    cap.textContent = caption;
+    var wrap = document.createElement('div');
+    wrap.className = cls || '';
+    var el = document.createElement(tag);
+    el.setConfig(config);
+    el.hass = mock.hass;
+    wrap.appendChild(el);
+    fig.appendChild(cap);
+    fig.appendChild(wrap);
+    container.appendChild(fig);
+    elements.push(el);
+    return el;
+  }
+
+  var cards = document.getElementById('cards');
+  var PRICE = 2.16;
+  add(cards, 'electros-card', { device_id: 'dev_charging', theme: theme('dark'), price_per_kwh: PRICE }, '1 · заряджається, буст 30 хв · dark · ціна 2.16', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_idle', theme: theme('light'), price_per_kwh: PRICE, quick_minutes: [15, 30, 60, 120] }, '2 · авто підключено, чекає 23:00 · light', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_waiting', theme: theme('dark') }, '3 · чекає авто · dark · без ціни', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_blocked', theme: theme('light'), price_per_kwh: PRICE }, '4 · заблоковано таймером (вихідні без обмежень увімк.) · light', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_fault', theme: theme('dark') }, '5 · помилка: витік струму · dark', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_offline', theme: theme('light') }, '6 · офлайн · light', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_unlimited', theme: theme('auto'), quick_minutes: [30, 60, 90, 180] }, '7 · ∞ без ліміту · auto (hass.themes.darkMode=true) · name_by_user з HTML', 'card-w');
+
+  ['dark', 'light'].forEach(function (t) {
+    var row = document.getElementById('tiles-' + t);
+    var th = theme(t);
+    add(row, 'electros-tile', { device_id: 'dev_charging', size: 'small', theme: th }, 'small · заряджається', 'tile-s');
+    add(row, 'electros-tile', { device_id: 'dev_charging', size: 'medium', theme: th }, 'medium · заряджається', 'tile-m');
+    add(row, 'electros-tile', { device_id: 'dev_waiting', size: 'small', theme: th }, 'small · чекає авто', 'tile-s');
+    add(row, 'electros-tile', { device_id: 'dev_idle', size: 'medium', theme: th }, 'medium · чекає нічного тарифу', 'tile-m');
+  });
+
+  var other = document.getElementById('tiles-other');
+  add(other, 'electros-tile', { device_id: 'dev_blocked', size: 'medium', theme: theme('dark') }, 'medium · заблоковано · dark', 'tile-m');
+  add(other, 'electros-tile', { device_id: 'dev_fault', size: 'medium', theme: theme('light') }, 'medium · помилка · light', 'tile-m');
+  add(other, 'electros-tile', { device_id: 'dev_offline', size: 'small', theme: theme('dark') }, 'small · офлайн · dark', 'tile-s');
+  add(other, 'electros-tile', { device_id: 'dev_fault', size: 'small', theme: theme('light') }, 'small · помилка · light', 'tile-s');
+  add(other, 'electros-tile', { device_id: 'dev_unlimited', size: 'medium', theme: theme('light') }, 'medium · ∞ · light', 'tile-m');
+  add(other, 'electros-tile', { device_id: 'dev_offline', size: 'medium', theme: theme('light') }, 'medium · офлайн · light', 'tile-m');
+
+  var empty = document.getElementById('empty');
+  add(empty, 'electros-card', { theme: theme('dark') }, 'картка без device_id', 'card-w');
+  add(empty, 'electros-card', { device_id: 'no_such_device', theme: theme('light') }, 'картка: пристрій не знайдено', 'card-w');
+  add(empty, 'electros-tile', { size: 'small', theme: theme('dark') }, 'плитка без device_id', 'tile-s');
+  add(empty, 'electros-tile', { device_id: 'no_such_device', size: 'medium', theme: theme('light') }, 'плитка: не знайдено', 'tile-m');
+
+  mock.subscribe(function (h) { elements.forEach(function (el) { el.hass = h; }); });
+  mock.startClock();
+
+  var logEl = document.getElementById('log');
+  var first = true;
+  function logLine(text, cls) {
+    if (first) { logEl.textContent = ''; first = false; }
+    var li = document.createElement('li');
+    if (cls) li.className = cls;
+    var t = new Date();
+    li.textContent = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0') + ':' + String(t.getSeconds()).padStart(2, '0') + '  ' + text;
+    logEl.appendChild(li);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  mock.onLog(function (e) {
+    if (e.note) { logLine(e.note, 'note'); console.log('[mock]', e.note); return; }
+    logLine(e.domain + '.' + e.service + ' ' + JSON.stringify(e.data));
+    console.log('[mock] callService', e.domain, e.service, e.data);
+  });
+  document.addEventListener('hass-more-info', function (e) { logLine('event hass-more-info ' + JSON.stringify(e.detail), 'ev'); });
+  document.addEventListener('hass-notification', function (e) { logLine('event hass-notification ' + JSON.stringify(e.detail), 'ev'); });
+
+  var clock = document.getElementById('clock');
+  function tick() {
+    var d = new Date();
+    clock.textContent = 'зараз ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
+  }
+  tick();
+  setInterval(tick, 1000);
+  window.__electrosPreview = { mock: mock, elements: elements };
+})();
+</script>
+</body>
+</html>

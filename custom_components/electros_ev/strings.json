@@ -3,22 +3,260 @@
     "step": {
       "user": {
         "title": "ElectroS EV Charger",
-        "description": "Enter your ElectroS charger credentials. Set a local host to connect directly on your network (no cloud).",
+        "description": "Enter the charger login (device name). For a direct connection on your network set the charger's local IP/host; then the password is optional. Without a host the cloud (electros.org.ua) is used and the password is required.",
         "data": {
           "charger_login": "Login (device name)",
-          "charger_password": "Password",
-          "host": "Local IP/host (optional — leave blank for cloud)",
+          "charger_password": "Cloud password",
+          "host": "Local IP/host (optional, leave blank for cloud)",
           "scan_interval": "Update interval (seconds)"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to charger",
+      "cannot_connect": "Failed to connect to the charger",
       "invalid_auth": "Invalid authentication",
-      "unknown": "Unknown error"
+      "unknown": "Unknown error",
+      "password_required": "The password is required for the cloud connection (or set a local host)",
+      "login_required": "Enter the charger login"
     },
     "abort": {
       "already_configured": "Device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ElectroS options",
+        "description": "Changing the host reconnects the integration. Leave the host blank to use the cloud (needs the password entered at setup).",
+        "data": {
+          "host": "Local IP/host (optional, leave blank for cloud)",
+          "scan_interval": "Update interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the charger",
+      "password_required": "The password is required for the cloud connection (or set a local host)",
+      "unknown": "Unknown error"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "waiting_for_vehicle": "Waiting for vehicle",
+          "vehicle_connected_idle": "Vehicle connected",
+          "charging": "Charging",
+          "charging_fault": "Charging error",
+          "charging_blocked": "Charging blocked",
+          "mains_voltage_low": "Mains voltage low",
+          "charger_communication_fault": "Communication error",
+          "offline": "Offline",
+          "leakage_current_fault": "Leakage current",
+          "overcurrent_fault": "Current above 40 A",
+          "unknown": "Unknown"
+        },
+        "state_attributes": {
+          "status_code": {
+            "name": "Status code"
+          },
+          "online": {
+            "name": "Online"
+          },
+          "device_time": {
+            "name": "Charger clock"
+          },
+          "events": {
+            "name": "Events"
+          }
+        }
+      },
+      "configured_current": {
+        "name": "Configured current"
+      },
+      "measured_current": {
+        "name": "Measured current"
+      },
+      "voltage": {
+        "name": "Mains voltage",
+        "state_attributes": {
+          "min": {
+            "name": "Minimum"
+          },
+          "max": {
+            "name": "Maximum"
+          },
+          "avg": {
+            "name": "Average"
+          }
+        }
+      },
+      "power": {
+        "name": "Charging power"
+      },
+      "energy": {
+        "name": "Consumed energy"
+      },
+      "session_energy": {
+        "name": "Session energy",
+        "state_attributes": {
+          "started_at": {
+            "name": "Started at"
+          },
+          "history": {
+            "name": "History"
+          }
+        }
+      },
+      "month_energy": {
+        "name": "Energy this month",
+        "state_attributes": {
+          "months": {
+            "name": "Months"
+          },
+          "current_month": {
+            "name": "Current month"
+          }
+        }
+      },
+      "boost_end": {
+        "name": "Boost ends",
+        "state_attributes": {
+          "active": {
+            "name": "Active"
+          },
+          "unlimited": {
+            "name": "Unlimited"
+          },
+          "minutes": {
+            "name": "Minutes"
+          },
+          "last_error": {
+            "name": "Last error"
+          }
+        }
+      }
+    },
+    "switch": {
+      "charging": {
+        "name": "Charging"
+      },
+      "night_timer": {
+        "name": "Night timer",
+        "state_attributes": {
+          "device_window": {
+            "name": "Window on the charger"
+          }
+        }
+      },
+      "weekend_free": {
+        "name": "Free charging on weekends"
+      }
+    },
+    "number": {
+      "charging_amps": {
+        "name": "Charging current"
+      },
+      "boost_minutes": {
+        "name": "Boost duration"
+      }
+    },
+    "time": {
+      "timer_start": {
+        "name": "Night window start"
+      },
+      "timer_end": {
+        "name": "Night window end"
+      }
+    },
+    "button": {
+      "boost": {
+        "name": "Charge now (boost)"
+      },
+      "reset_energy": {
+        "name": "Reset kWh"
+      }
+    }
+  },
+  "services": {
+    "charge_for": {
+      "name": "Charge for",
+      "description": "Start charging now for the given number of minutes, bypassing the night timer, then stop and restore the timer.",
+      "fields": {
+        "device_id": {
+          "name": "Charger",
+          "description": "The ElectroS charger."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "How long to charge."
+        },
+        "amps": {
+          "name": "Current",
+          "description": "Charging current in amperes (6-32, step 2). Default: the charging current setting."
+        }
+      }
+    },
+    "extend_charge": {
+      "name": "Extend charging",
+      "description": "Add minutes to the active timed charge (starts one if none is active).",
+      "fields": {
+        "device_id": {
+          "name": "Charger",
+          "description": "The ElectroS charger."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "Minutes to add."
+        }
+      }
+    },
+    "stop_charging": {
+      "name": "Stop charging",
+      "description": "Stop charging, cancel any timed charge and restore the night timer.",
+      "fields": {
+        "device_id": {
+          "name": "Charger",
+          "description": "The ElectroS charger."
+        }
+      }
+    },
+    "set_timer": {
+      "name": "Set night timer",
+      "description": "Change the night window and/or enable or disable it.",
+      "fields": {
+        "device_id": {
+          "name": "Charger",
+          "description": "The ElectroS charger."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Start of the window (HH:MM)."
+        },
+        "end": {
+          "name": "End",
+          "description": "End of the window (HH:MM)."
+        },
+        "enabled": {
+          "name": "Enabled",
+          "description": "Enable or disable the night timer."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_device": {
+      "message": "Device {device_id} is not an ElectroS charger."
+    },
+    "entry_not_loaded": {
+      "message": "The ElectroS charger {device_id} is not loaded."
+    },
+    "command_failed": {
+      "message": "The charger did not accept the {command} command (not reachable?)."
+    },
+    "invalid_input": {
+      "message": "Invalid service data: {error}"
     }
   }
 }

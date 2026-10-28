@@ -1,0 +1,262 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Зарядка ElectroS EV",
+        "description": "Введите логин зарядки (имя устройства). Для прямого подключения в вашей сети укажите локальный IP/адрес зарядки, тогда пароль не обязателен. Без адреса используется облако (electros.org.ua), и нужен пароль.",
+        "data": {
+          "charger_login": "Логин (имя устройства)",
+          "charger_password": "Пароль облака",
+          "host": "Локальный IP/адрес (необязательно, пусто = облако)",
+          "scan_interval": "Интервал обновления (секунды)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться к зарядке",
+      "invalid_auth": "Неверная аутентификация",
+      "unknown": "Неизвестная ошибка",
+      "password_required": "Для подключения через облако нужен пароль (или укажите локальный адрес)",
+      "login_required": "Введите логин зарядки"
+    },
+    "abort": {
+      "already_configured": "Устройство уже настроено"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Настройки ElectroS",
+        "description": "Смена адреса переподключает интеграцию. Пустой адрес = облако (нужен пароль, введённый при настройке).",
+        "data": {
+          "host": "Локальный IP/адрес (необязательно, пусто = облако)",
+          "scan_interval": "Интервал обновления (секунды)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться к зарядке",
+      "password_required": "Для подключения через облако нужен пароль (или укажите локальный адрес)",
+      "unknown": "Неизвестная ошибка"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Статус",
+        "state": {
+          "waiting_for_vehicle": "Ожидание авто",
+          "vehicle_connected_idle": "Авто подключено",
+          "charging": "Заряжает",
+          "charging_fault": "Ошибка зарядки",
+          "charging_blocked": "Зарядка запрещена",
+          "mains_voltage_low": "Низкое напряжение сети",
+          "charger_communication_fault": "Ошибка связи",
+          "offline": "Офлайн",
+          "leakage_current_fault": "Утечка тока",
+          "overcurrent_fault": "Ток выше 40 А",
+          "unknown": "Неизвестно"
+        },
+        "state_attributes": {
+          "status_code": {
+            "name": "Код статуса"
+          },
+          "online": {
+            "name": "Онлайн"
+          },
+          "device_time": {
+            "name": "Часы зарядки"
+          },
+          "events": {
+            "name": "События"
+          }
+        }
+      },
+      "configured_current": {
+        "name": "Заданный ток"
+      },
+      "measured_current": {
+        "name": "Измеренный ток"
+      },
+      "voltage": {
+        "name": "Напряжение сети",
+        "state_attributes": {
+          "min": {
+            "name": "Минимум"
+          },
+          "max": {
+            "name": "Максимум"
+          },
+          "avg": {
+            "name": "Среднее"
+          }
+        }
+      },
+      "power": {
+        "name": "Мощность зарядки"
+      },
+      "energy": {
+        "name": "Потреблённая энергия"
+      },
+      "session_energy": {
+        "name": "Энергия сессии",
+        "state_attributes": {
+          "started_at": {
+            "name": "Начало"
+          },
+          "history": {
+            "name": "История"
+          }
+        }
+      },
+      "month_energy": {
+        "name": "Энергия за месяц",
+        "state_attributes": {
+          "months": {
+            "name": "Месяцы"
+          },
+          "current_month": {
+            "name": "Текущий месяц"
+          }
+        }
+      },
+      "boost_end": {
+        "name": "Конец зарядки по времени",
+        "state_attributes": {
+          "active": {
+            "name": "Активна"
+          },
+          "unlimited": {
+            "name": "Без ограничения"
+          },
+          "minutes": {
+            "name": "Минуты"
+          },
+          "last_error": {
+            "name": "Последняя ошибка"
+          }
+        }
+      }
+    },
+    "switch": {
+      "charging": {
+        "name": "Зарядка"
+      },
+      "night_timer": {
+        "name": "Ночной таймер",
+        "state_attributes": {
+          "device_window": {
+            "name": "Окно на зарядке"
+          }
+        }
+      },
+      "weekend_free": {
+        "name": "Свободная зарядка в выходные"
+      }
+    },
+    "number": {
+      "charging_amps": {
+        "name": "Ток зарядки"
+      },
+      "boost_minutes": {
+        "name": "Длительность зарядки по времени"
+      }
+    },
+    "time": {
+      "timer_start": {
+        "name": "Начало ночного окна"
+      },
+      "timer_end": {
+        "name": "Конец ночного окна"
+      }
+    },
+    "button": {
+      "boost": {
+        "name": "Зарядить сейчас"
+      },
+      "reset_energy": {
+        "name": "Сбросить кВт·ч"
+      }
+    }
+  },
+  "services": {
+    "charge_for": {
+      "name": "Заряжать в течение",
+      "description": "Начать зарядку сейчас на указанное число минут в обход ночного таймера, затем остановить и восстановить таймер.",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        },
+        "minutes": {
+          "name": "Минуты",
+          "description": "Сколько времени заряжать."
+        },
+        "amps": {
+          "name": "Ток",
+          "description": "Ток зарядки в амперах (6-32, шаг 2). По умолчанию: настройка тока зарядки."
+        }
+      }
+    },
+    "extend_charge": {
+      "name": "Продлить зарядку",
+      "description": "Добавить минуты к активной зарядке по времени (если её нет, начать новую).",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        },
+        "minutes": {
+          "name": "Минуты",
+          "description": "Сколько минут добавить."
+        }
+      }
+    },
+    "stop_charging": {
+      "name": "Остановить зарядку",
+      "description": "Остановить зарядку, отменить зарядку по времени и восстановить ночной таймер.",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        }
+      }
+    },
+    "set_timer": {
+      "name": "Настроить ночной таймер",
+      "description": "Изменить ночное окно и/или включить либо выключить его.",
+      "fields": {
+        "device_id": {
+          "name": "Зарядка",
+          "description": "Зарядка ElectroS."
+        },
+        "start": {
+          "name": "Начало",
+          "description": "Начало окна (ЧЧ:ММ)."
+        },
+        "end": {
+          "name": "Конец",
+          "description": "Конец окна (ЧЧ:ММ)."
+        },
+        "enabled": {
+          "name": "Включён",
+          "description": "Включить или выключить ночной таймер."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_device": {
+      "message": "Устройство {device_id} не является зарядкой ElectroS."
+    },
+    "entry_not_loaded": {
+      "message": "Зарядка ElectroS {device_id} не загружена."
+    },
+    "command_failed": {
+      "message": "Зарядка не приняла команду {command} (недоступна?)."
+    },
+    "invalid_input": {
+      "message": "Неверные данные сервиса: {error}"
+    }
+  }
+}

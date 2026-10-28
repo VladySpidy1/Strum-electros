@@ -1,18 +1,29 @@
-"""ElectroS EV Charger WebSocket API client."""
+"""ElectroS EV Charger WebSocket API client.
+
+Raw WebSocket implementation (the cloud needs a non-standard handshake with the
+``example-protocol`` subprotocol and session cookies). Message formats and
+status parsing live in :mod:`.protocol`.
+
+Every public call is serialized with an ``asyncio.Lock``: the charger and the
+cloud handle one request at a time, and polls must not interleave with commands.
+Status replies contain Wi-Fi and cloud secrets, so raw messages are never logged.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+from datetime import datetime
 import logging
 import os
 import ssl
 import struct
+from typing import Any
 
 import aiohttp
 
+from . import protocol
 from .const import (
-    AMP_TO_INDEX,
     DEFAULT_BASE_URL,
     DEFAULT_LOCAL_PORT,
     DEFAULT_LOCAL_WS_PATH,
@@ -20,56 +31,38 @@ from .const import (
     DEFAULT_WS_ORIGIN,
     DEFAULT_WS_PATH,
     DEFAULT_WS_PROTOCOL,
-    OFFLINE_STATUS_CODES,
-    STATUS_TEXT_EN,
-    SUPPORTED_AMPS,
 )
+from .protocol import normalize_amps  # noqa: F401  (re-exported for platforms)
 
 _LOGGER = logging.getLogger(__name__)
 
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = 10
+#: After a command is sent the server usually answers with a status frame.
+#: If it does not, the command has still been delivered; do not treat it as failure.
+COMMAND_REPLY_TIMEOUT = 5
+HTTP_TIMEOUT = 30
 
-def normalize_amps(amps: int) -> int:
-    """Normalize amps to nearest supported value."""
-    if amps <= 0:
-        return 0
-    supported = [value for value in SUPPORTED_AMPS if value <= amps]
-    if not supported:
-        return 0
-    return max(supported)
+_SSL_CONTEXT: ssl.SSLContext | None = None
 
 
-def parse_charger_state(message: str) -> dict:
-    """Parse charger state from WebSocket message."""
-    parts = message.split("\n")
-    current_amps = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
-    status_code = parts[8] if len(parts) > 8 else None
-    measured_current = (
-        int(parts[9]) / 10 if len(parts) > 9 and parts[9].isdigit() else None
-    )
-    mains_voltage = None
-    if len(parts) > 16 and parts[16].isdigit():
-        mains_voltage = int(parts[16])
-    elif len(parts) > 10 and parts[10].isdigit():
-        mains_voltage = int(parts[10])
-    # [11] consumed energy (kWh x 1e6), [12] power (kW x 1e4), as in the web panel.
-    energy_kwh = (
-        round(int(parts[11]) / 1_000_000, 3)
-        if len(parts) > 11 and parts[11].isdigit()
-        else None
-    )
-    charging_power_w = (
-        round(int(parts[12]) / 10, 1) if len(parts) > 12 and parts[12].isdigit() else None
-    )
-    return {
-        "online": status_code not in OFFLINE_STATUS_CODES,
-        "status_code": status_code,
-        "status_text": STATUS_TEXT_EN.get(status_code, "unknown"),
-        "current_amps": current_amps,
-        "measured_current": measured_current,
-        "mains_voltage": mains_voltage,
-        "charging_power_w": charging_power_w,
-        "energy_kwh": energy_kwh,
-    }
+def _insecure_ssl_context() -> ssl.SSLContext:
+    """TLS context without certificate checks (as the original integration).
+
+    Built without ``create_default_context`` so no CA bundle is loaded from disk
+    inside the event loop.
+    """
+    global _SSL_CONTEXT  # noqa: PLW0603
+    if _SSL_CONTEXT is None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        _SSL_CONTEXT = context
+    return _SSL_CONTEXT
+
+
+class ElectroSError(Exception):
+    """Communication with the charger failed."""
 
 
 class ElectroSApi:
@@ -78,7 +71,7 @@ class ElectroSApi:
     def __init__(
         self,
         login: str,
-        password: str,
+        password: str | None = None,
         host: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
         ws_host: str = DEFAULT_WS_HOST,
@@ -89,221 +82,281 @@ class ElectroSApi:
         """Initialize the API client.
 
         If ``host`` is set, connect directly to the charger on the LAN
-        (ws://host/ws, no cloud login, no TLS); otherwise go through the cloud.
+        (ws://host/ws, no cloud login, no TLS, no password needed); otherwise go
+        through the cloud, which needs the cloud password.
         """
         self._login = login
-        self._password = password
-        self._host = host
+        self._password = password or ""
+        self._host = (host or "").strip() or None
         self._base_url = base_url
         self._ws_host = ws_host
         self._ws_path = ws_path
         self._ws_origin = ws_origin
         self._ws_protocol = ws_protocol
         self._cookies: dict[str, str] | None = None
+        self._lock = asyncio.Lock()
 
     @property
-    def _local(self) -> bool:
+    def login(self) -> str:
+        """Charger login (device name)."""
+        return self._login
+
+    @property
+    def is_local(self) -> bool:
         """True when configured for a direct local-network connection."""
         return bool(self._host)
 
+    # Backwards-compatible private alias used by older code.
+    _local = is_local
+
+    # ------------------------------------------------------------------ #
+    # Transport
+    # ------------------------------------------------------------------ #
+
     async def _login_session(self) -> dict[str, str]:
-        """Login and return session cookies."""
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        """Log in to the cloud and return session cookies."""
+        if not self._password:
+            raise ElectroSError("cloud mode needs the charger password")
+        connector = aiohttp.TCPConnector(ssl=_insecure_ssl_context())
+        timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
         async with aiohttp.ClientSession(connector=connector) as session:
-            await session.get(self._base_url + "main.php", timeout=aiohttp.ClientTimeout(total=30))
+            await session.get(self._base_url + "main.php", timeout=timeout)
             await session.post(
                 self._base_url + "login.php",
                 data={"username": self._login, "password": self._password},
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=timeout,
                 allow_redirects=True,
             )
             cookies = {cookie.key: cookie.value for cookie in session.cookie_jar}
-            self._cookies = cookies
-            return cookies
+        self._cookies = cookies
+        return cookies
 
-    async def _ws_communicate(self, message: str) -> str | None:
-        """Open WebSocket, send message, receive response."""
+    async def _ws_communicate(
+        self, message: str, reply_timeout: float | None = None
+    ) -> str | None:
+        """Open a WebSocket, send one text frame, return the first text reply.
+
+        Returns None if no text frame arrived within ``reply_timeout``.
+        """
+        if reply_timeout is None:
+            reply_timeout = READ_TIMEOUT
         key = base64.b64encode(os.urandom(16)).decode()
 
-        if self._local:
+        if self.is_local:
             # Direct LAN connection: plain ws://host/ws, no login, no TLS.
-            host, port, path, ssl_context = (
-                self._host,
-                DEFAULT_LOCAL_PORT,
-                DEFAULT_LOCAL_WS_PATH,
-                None,
-            )
+            host, port, path = self._host, DEFAULT_LOCAL_PORT, DEFAULT_LOCAL_WS_PATH
+            ssl_context: ssl.SSLContext | None = None
             extra_headers = ""
         else:
             if not self._cookies:
                 await self._login_session()
             cookie_header = "; ".join(
-                f"{name}={value}" for name, value in self._cookies.items()
+                f"{name}={value}" for name, value in (self._cookies or {}).items()
             )
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+            ssl_context = _insecure_ssl_context()
             host, port, path = self._ws_host, 443, self._ws_path
-            extra_headers = (
-                f"Origin: {self._ws_origin}\r\n" f"Cookie: {cookie_header}\r\n"
-            )
+            extra_headers = f"Origin: {self._ws_origin}\r\nCookie: {cookie_header}\r\n"
 
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port, ssl=ssl_context),
-            timeout=10,
+            timeout=CONNECT_TIMEOUT,
         )
-
-        request = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            f"Sec-WebSocket-Protocol: {self._ws_protocol}\r\n"
-            f"{extra_headers}"
-            "\r\n"
-        )
-        writer.write(request.encode("utf-8"))
-        await writer.drain()
-
-        response = b""
-        while b"\r\n\r\n" not in response:
-            chunk = await asyncio.wait_for(reader.read(4096), timeout=10)
-            if not chunk:
-                break
-            response += chunk
-
-        if b"101 Switching Protocols" not in response:
-            writer.close()
-            raise RuntimeError("WebSocket upgrade failed")
-
-        # Send WebSocket text frame
-        payload = message.encode("utf-8")
-        header = bytearray([0x81])
-        length = len(payload)
-        if length < 126:
-            header.append(0x80 | length)
-        elif length < 65536:
-            header.append(0x80 | 126)
-            header.extend(struct.pack("!H", length))
-        else:
-            header.append(0x80 | 127)
-            header.extend(struct.pack("!Q", length))
-        mask = os.urandom(4)
-        header.extend(mask)
-        masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
-        writer.write(header + masked)
-        await writer.drain()
-
-        # Receive WebSocket frame
-        first = await asyncio.wait_for(reader.readexactly(2), timeout=10)
-        byte1, byte2 = first
-        opcode = byte1 & 0x0F
-        frame_length = byte2 & 0x7F
-        is_masked = (byte2 & 0x80) != 0
-        if frame_length == 126:
-            frame_length = struct.unpack("!H", await reader.readexactly(2))[0]
-        elif frame_length == 127:
-            frame_length = struct.unpack("!Q", await reader.readexactly(8))[0]
-        frame_mask = await reader.readexactly(4) if is_masked else b""
-        recv_payload = b""
-        while len(recv_payload) < frame_length:
-            chunk = await asyncio.wait_for(
-                reader.read(frame_length - len(recv_payload)), timeout=10
-            )
-            if not chunk:
-                break
-            recv_payload += chunk
-        if is_masked:
-            recv_payload = bytes(
-                byte ^ frame_mask[i % 4] for i, byte in enumerate(recv_payload)
-            )
-
-        writer.close()
-
-        if opcode != 1:
-            return None
-        return recv_payload.decode("utf-8", errors="replace")
-
-    async def get_state(self) -> dict:
-        """Get charger state."""
         try:
-            if not self._local:
+            request = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                f"Sec-WebSocket-Protocol: {self._ws_protocol}\r\n"
+                f"{extra_headers}"
+                "\r\n"
+            )
+            writer.write(request.encode("utf-8"))
+            await writer.drain()
+
+            # readuntil() leaves a frame that follows the handshake in the buffer.
+            try:
+                response = await asyncio.wait_for(
+                    reader.readuntil(b"\r\n\r\n"), timeout=READ_TIMEOUT
+                )
+            except (asyncio.IncompleteReadError, asyncio.LimitOverrunError) as err:
+                raise ElectroSError("WebSocket upgrade failed") from err
+            if b" 101" not in response.split(b"\r\n", 1)[0]:
+                raise ElectroSError("WebSocket upgrade failed")
+
+            writer.write(_encode_text_frame(message))
+            await writer.drain()
+
+            try:
+                return await asyncio.wait_for(
+                    _read_text_frame(reader), timeout=reply_timeout
+                )
+            except asyncio.TimeoutError:
+                return None
+        finally:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=2)
+            except Exception:  # noqa: BLE001 - closing errors are irrelevant
+                pass
+
+    async def _send(self, message: str, reply_timeout: float | None = None) -> str | None:
+        """Send one message (logging in first in cloud mode), serialized."""
+        async with self._lock:
+            if not self.is_local:
+                # Fresh session for every request, as the original integration did.
                 self._cookies = None
                 await self._login_session()
-            response = await self._ws_communicate(f"site {self._login}")
-            if response is None:
-                return self._offline_state("invalid_response")
-            return parse_charger_state(response)
-        except Exception as exc:
-            _LOGGER.error("Failed to get charger state: %s", exc)
-            return self._offline_state(f"error: {exc}")
+            return await self._ws_communicate(message, reply_timeout)
+
+    async def _command(self, message: str, what: str) -> bool:
+        """Send a command; True on success, False (logged) on failure."""
+        try:
+            await self._send(message, reply_timeout=COMMAND_REPLY_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("Failed to send %s command: %s", what, _safe_error(exc))
+            return False
+        _LOGGER.debug("Sent %s command", what)
+        return True
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+
+    async def get_state(self) -> dict[str, Any]:
+        """Fetch and parse the charger status. Raises ElectroSError on failure."""
+        try:
+            response = await self._send(protocol.build_status(self._login))
+        except ElectroSError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ElectroSError(_safe_error(exc)) from exc
+        if response is None:
+            raise ElectroSError("no status reply")
+        try:
+            state = protocol.parse_status(response)
+        except ValueError as exc:
+            raise ElectroSError("unexpected reply") from exc
+        _LOGGER.debug(
+            "Status %s (%s), %s A set, %s A measured, %s V, timer %s",
+            state["status_code"],
+            state["status_text"],
+            state["current_amps"],
+            state["measured_current"],
+            state["mains_voltage"],
+            protocol.window_to_str(state["timer_window"]) or "off",
+        )
+        return state
 
     async def start_charging(self, amps: int) -> bool:
-        """Start charging at specified amperage."""
+        """Start charging at the given current (A)."""
         amps = normalize_amps(amps)
         if amps <= 0:
             return await self.stop_charging()
-        try:
-            if not self._local:
-                self._cookies = None
-                await self._login_session()
-            index = AMP_TO_INDEX[amps]
-            await self._ws_communicate(
-                f"site {self._login}\nstart\n{index}\n0\n"
-            )
-            _LOGGER.info("Sent start command with %dA", amps)
-            return True
-        except Exception as exc:
-            _LOGGER.error("Failed to start charging: %s", exc)
-            return False
+        ok = await self._command(protocol.build_start(self._login, amps), "start")
+        if ok:
+            _LOGGER.info("Sent start command with %d A", amps)
+        return ok
 
     async def stop_charging(self) -> bool:
         """Stop charging."""
-        try:
-            if not self._local:
-                self._cookies = None
-                await self._login_session()
-            await self._ws_communicate(f"site {self._login}\nstop")
+        ok = await self._command(protocol.build_stop(self._login), "stop")
+        if ok:
             _LOGGER.info("Sent stop command")
-            return True
-        except Exception as exc:
-            _LOGGER.error("Failed to stop charging: %s", exc)
-            return False
+        return ok
 
     async def reset_energy(self) -> bool:
-        """Reset the consumed-energy (kWh) counter."""
-        try:
-            self._cookies = None
-            await self._login_session()
-            await self._ws_communicate(f"site {self._login}\nresetkwt")
+        """Reset the consumed-energy (kWh) counter.
+
+        Local mode talks to the charger directly (no cloud login).
+        """
+        ok = await self._command(protocol.build_resetkwt(self._login), "resetkwt")
+        if ok:
             _LOGGER.info("Sent energy counter reset command")
-            return True
-        except Exception as exc:
-            _LOGGER.error("Failed to reset energy counter: %s", exc)
-            return False
+        return ok
+
+    async def set_timer(self, start: str, end: str, now: datetime) -> bool:
+        """Enable the daily timer window ``start``-``end`` and set the clock to ``now``."""
+        window = (protocol.parse_hhmm(start), protocol.parse_hhmm(end))
+        ok = await self._command(
+            protocol.build_datetime(self._login, now, window), "datetime"
+        )
+        if ok:
+            _LOGGER.info("Set charger timer to %s-%s", window[0], window[1])
+        return ok
+
+    async def disable_timer(self, now: datetime) -> bool:
+        """Disable the daily timer window and set the clock to ``now``."""
+        ok = await self._command(
+            protocol.build_datetime(self._login, now, None), "datetime"
+        )
+        if ok:
+            _LOGGER.info("Disabled charger timer")
+        return ok
 
     async def test_connection(self) -> bool:
-        """Test connection to charger."""
-        state = await self.get_state()
-        return state.get("status_text") != "unknown" and "error" not in state.get(
-            "status_text", ""
-        )
+        """Return True if a status message can be read."""
+        try:
+            await self.get_state()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Connection test failed: %s", _safe_error(exc))
+            return False
+        return True
 
-    @staticmethod
-    def _offline_state(reason: str) -> dict:
-        """Return offline state dict."""
-        return {
-            "online": False,
-            "status_code": None,
-            "status_text": reason,
-            "current_amps": None,
-            "measured_current": None,
-            "mains_voltage": None,
-            "charging_power_w": None,
-            "energy_kwh": None,
-        }
+
+def _safe_error(exc: BaseException) -> str:
+    """Describe an exception without leaking message contents."""
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    text = str(exc) or exc.__class__.__name__
+    return text[:200]
+
+
+def _encode_text_frame(message: str) -> bytes:
+    """Build a masked client text frame."""
+    payload = message.encode("utf-8")
+    header = bytearray([0x81])
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header.extend(struct.pack("!H", length))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.pack("!Q", length))
+    mask = os.urandom(4)
+    header.extend(mask)
+    masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
+    return bytes(header) + masked
+
+
+async def _read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
+    """Read one frame; returns (opcode, payload)."""
+    byte1, byte2 = await reader.readexactly(2)
+    opcode = byte1 & 0x0F
+    length = byte2 & 0x7F
+    is_masked = (byte2 & 0x80) != 0
+    if length == 126:
+        length = struct.unpack("!H", await reader.readexactly(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", await reader.readexactly(8))[0]
+    frame_mask = await reader.readexactly(4) if is_masked else b""
+    payload = await reader.readexactly(length) if length else b""
+    if is_masked:
+        payload = bytes(byte ^ frame_mask[i % 4] for i, byte in enumerate(payload))
+    return opcode, payload
+
+
+async def _read_text_frame(reader: asyncio.StreamReader) -> str | None:
+    """Return the first text frame (skipping ping/pong); None on close/binary."""
+    for _ in range(10):
+        opcode, payload = await _read_frame(reader)
+        if opcode == 0x1:
+            return payload.decode("utf-8", errors="replace")
+        if opcode in (0x9, 0xA):  # ping / pong
+            continue
+        return None
+    return None
