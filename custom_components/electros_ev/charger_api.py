@@ -51,9 +51,15 @@ def parse_charger_state(message: str) -> dict:
         mains_voltage = int(parts[16])
     elif len(parts) > 10 and parts[10].isdigit():
         mains_voltage = int(parts[10])
-    charging_power_w = None
-    if measured_current is not None and mains_voltage is not None:
-        charging_power_w = round(measured_current * mains_voltage, 1)
+    # [11] consumed energy (kWh x 1e6), [12] power (kW x 1e4), as in the web panel.
+    energy_kwh = (
+        round(int(parts[11]) / 1_000_000, 3)
+        if len(parts) > 11 and parts[11].isdigit()
+        else None
+    )
+    charging_power_w = (
+        round(int(parts[12]) / 10, 1) if len(parts) > 12 and parts[12].isdigit() else None
+    )
     return {
         "online": status_code not in OFFLINE_STATUS_CODES,
         "status_code": status_code,
@@ -62,6 +68,7 @@ def parse_charger_state(message: str) -> dict:
         "measured_current": measured_current,
         "mains_voltage": mains_voltage,
         "charging_power_w": charging_power_w,
+        "energy_kwh": energy_kwh,
     }
 
 
@@ -268,6 +275,18 @@ class ElectroSApi:
             _LOGGER.error("Failed to stop charging: %s", exc)
             return False
 
+    async def reset_energy(self) -> bool:
+        """Reset the consumed-energy (kWh) counter."""
+        try:
+            self._cookies = None
+            await self._login_session()
+            await self._ws_communicate(f"site {self._login}\nresetkwt")
+            _LOGGER.info("Sent energy counter reset command")
+            return True
+        except Exception as exc:
+            _LOGGER.error("Failed to reset energy counter: %s", exc)
+            return False
+
     async def test_connection(self) -> bool:
         """Test connection to charger."""
         state = await self.get_state()
@@ -286,4 +305,5 @@ class ElectroSApi:
             "measured_current": None,
             "mains_voltage": None,
             "charging_power_w": None,
+            "energy_kwh": None,
         }
