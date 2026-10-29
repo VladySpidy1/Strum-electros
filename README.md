@@ -38,7 +38,7 @@
 ### HACS (власний репозиторій)
 
 1. HACS → **⋮** (угорі праворуч) → **Custom repositories**.
-2. Вставте URL цього репозиторію (з адресного рядка, наприклад `https://github.com/podzolkov/electros-ev-ha-from-andriy`), тип **Integration** → **Add**.
+2. Вставте `https://github.com/VladySpidy1/Strum-electros`, тип **Integration** → **Add**.
 3. Знайдіть **Струм — розумна зарядка ElectroS** → **Download**.
 4. Перезапустіть Home Assistant.
 
@@ -139,7 +139,7 @@ Home Assistant будує id з англійських назв (навіть в
 
 `charge_energy`, кнопка `charge_energy_boost` або режим «Енергія» в картці. Старт такий самий. HA рахує енергію, передану від старту (сума приростів лічильника між опитуваннями, тож «Reset кВт» посеред зарядки нічого не ламає), опитує зарядку кожні 20 с і на цілі зупиняє зарядку й повертає таймер — навіть усередині нічного вікна. `extend_charge {kwh}` збільшує ціль.
 
-Страховий термін: `старт + ціль / (струм × 0,23 кВт) × 1,5 + 30 хв`. Якщо до нього ціль не досягнуто — стоп і `last_error = energy_deadline`. `boost_ends` показує оцінку кінця (залишок ÷ поточна потужність) і `unknown`, поки потужність 0.
+Якщо авто 10 хв не бере струм (батарея повна, авто на паузі або не підключене), режим завершується й нічний таймер повертається; усередині нічного вікна стоп не надсилається — далі заряджає розклад. Страховий термін: `старт + ціль / (струм × 0,23 кВт) × 1,5 + 30 хв`. Якщо до нього ціль не досягнуто — стоп і `last_error = energy_deadline`. `boost_ends` показує оцінку кінця (залишок ÷ поточна потужність) і `unknown`, поки потужність 0.
 
 ### Вихідні та зміни у вебпанелі
 
@@ -153,7 +153,6 @@ Home Assistant будує id з англійських назв (навіть в
 
 - На зарядці лише одне щоденне вікно; кілька вікон або різні вікна по днях недоступні.
 - Бустом керує HA. Якщо HA вимкнений, зарядка йде з вимкненим таймером, а буст закінчиться лише тоді, коли HA знову запрацює.
-- Якщо авто перестало брати струм раніше за ціль у кВт·год (батарея повна), буст чекає страхового терміну, і до того часу таймер вимкнений.
 - Перший приріст після старту бусту на кВт·год може включати енергію до одного інтервалу опитування до старту, якщо авто вже заряджалося.
 - Розподіл на день/ніч і вартість рахуються **від моменту встановлення** v2; історії зарядки до того в них немає. Статистика в картці — теж від встановлення (місяці до того в «Рік» беруться з лічильників зарядки, без розподілу).
 - На зарядці не перевірено: що ввімкнення таймера посеред вікна не перериває зарядку; що поле потужності показує 0, коли авто не заряджається; локальний режим.
@@ -249,7 +248,7 @@ Thanks to [podzolkov](https://github.com/podzolkov) for the original integration
 
 ## Installation
 
-- **HACS**: HACS → ⋮ → Custom repositories → this repository's URL, category *Integration* → Download → restart Home Assistant.
+- **HACS**: HACS → ⋮ → Custom repositories → `https://github.com/VladySpidy1/Strum-electros`, category *Integration* → Download → restart Home Assistant.
 - **Manual**: copy `custom_components/electros_ev/` to `config/custom_components/` and restart.
 - Then **Settings → Devices & services → Add integration → Струм — розумна зарядка ElectroS**: charger login, cloud password (optional with a local IP), optional local IP, update interval (30–600 s, default 60). The options flow changes the local IP, the interval and the night tariff zone (default 23:00–07:00).
 
@@ -273,10 +272,10 @@ Entity ids are built from the English names: `<domain>.electros_<login>_<name>`;
 
 - **Night timer**: the charger has a single daily window. HA keeps the desired settings and writes the window only on transitions (user changes, boost start/end, the daily 00:00:05 weekend check, once after startup if needed); every write also sets the charger clock.
 - **Timed boost**: the timer is disabled (~3 s), charging starts, at the end HA stops and restores the timer — unless the restored night window allows charging at that moment, then charging simply continues. **∞** (charging switch on while the timer blocks) charges until the car stops; ∞ during a timed or energy boost turns it into an unlimited one.
-- **Energy boost**: HA adds up the positive counter deltas since the start (a counter reset does not end it), polls every 20 s, stops at the target and restores the timer. Safety deadline `start + target / (amps × 0.23 kW) × 1.5 + 30 min`, then stop with `last_error = energy_deadline`.
+- **Energy boost**: HA adds up the positive counter deltas since the start (a counter reset does not end it), polls every 20 s, stops at the target and restores the timer. If the car takes no current for 10 min (battery full, paused, not plugged in) the boost ends and the timer comes back (no stop inside the night window). Safety deadline `start + target / (amps × 0.23 kW) × 1.5 + 30 min`, then stop with `last_error = energy_deadline`.
 - **Weekends and web panel changes**: free weekends disable the timer on Saturday and Sunday. A window changed in the web panel is adopted (not within 2 minutes after HA's own write, not during a boost); at startup HA adopts a window changed while it was down and writes only if the charger still has HA's last value but HA wants another one.
 - **Charger offline** (status `offline`, e.g. a power cut while HA runs on a UPS): HA sends it nothing. When it is back, HA writes its window (instead of adopting what the charger kept) and re-sends a stop it still owes if the charger is charging. A stop that did not arrive shows as `last_error = stop_failed` and is retried on every poll while the charger charges (not after a timed boost once the night window has started).
-- **Limits**: one daily window; if HA is down a running boost ends only when HA is back; an energy boost whose car stopped early waits for the deadline; the tariff split and the statistics start at installation.
+- **Limits**: one daily window; if HA is down a running boost ends only when HA is back; the tariff split and the statistics start at installation.
 
 ## Tariffs and the Energy dashboard
 

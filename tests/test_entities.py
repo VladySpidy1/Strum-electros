@@ -457,3 +457,17 @@ async def test_device_id_lookup_matches_card(hass: HomeAssistant, charger: FakeC
         if entry.device_id == dev
     }
     assert set(by_key) == {f"{domain}.{key}" for domain, key in EXPECTED_ENTITIES}
+
+
+async def test_session_counts_the_poll_that_starts_it(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """Energy only flows while charging: the delta of the first charging poll belongs
+    to the new session, as it does to the tariff totals."""
+    freezer.move_to(local_dt(2026, 10, 28, 23, 30))
+    entry = await async_setup_entry(hass, charger)
+
+    charger.status = "2"
+    charger.energy_raw = 25_920_000
+    await async_poll(hass, entry)
+    assert state(hass, "sensor", "session_energy").state == "0.12"

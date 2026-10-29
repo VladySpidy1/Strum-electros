@@ -4,10 +4,10 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": ["http", "frontend"],
-  "documentation": "https://github.com/podzolkov/electros-ev-ha-from-andriy",
+  "documentation": "https://github.com/VladySpidy1/Strum-electros",
   "integration_type": "device",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/podzolkov/electros-ev-ha-from-andriy/issues",
+  "issue_tracker": "https://github.com/VladySpidy1/Strum-electros/issues",
   "requirements": [],
   "version": "2.1.0"
 }

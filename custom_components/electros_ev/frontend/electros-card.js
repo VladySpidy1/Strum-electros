@@ -18,7 +18,7 @@
 
   const VERSION = '2.1.0';
   const DOMAIN = 'electros_ev';
-  const DOCS_URL = 'https://github.com/podzolkov/electros-ev-ha-from-andriy';
+  const DOCS_URL = 'https://github.com/VladySpidy1/Strum-electros';
 
   const STATUSES = [
     'waiting_for_vehicle', 'vehicle_connected_idle', 'charging', 'charging_fault', 'charging_blocked',
@@ -112,6 +112,7 @@
       start: 'Почати зарядку',
       charge_n: 'Зарядити {d}',
       starting: 'Запускаю…',
+      retry: 'Спробувати ще раз',
       stopping: 'Зупиняю…',
       slide: 'Проведіть, щоб зарядити',
       slide_aria: 'Зарядити {d}: проведіть вправо або натисніть Enter',
@@ -254,6 +255,7 @@
       start: 'Начать зарядку',
       charge_n: 'Зарядить {d}',
       starting: 'Запускаю…',
+      retry: 'Попробовать ещё раз',
       stopping: 'Останавливаю…',
       slide: 'Проведите, чтобы зарядить',
       slide_aria: 'Зарядить {d}: проведите вправо или нажмите Enter',
@@ -396,6 +398,7 @@
       start: 'Start charging',
       charge_n: 'Charge {d}',
       starting: 'Starting…',
+      retry: 'Try again',
       stopping: 'Stopping…',
       slide: 'Slide to charge',
       slide_aria: 'Charge {d}: slide right or press Enter',
@@ -1275,6 +1278,7 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .main{height:56px;border-radius:28px;display:flex;align-items:center;justify-content:center;gap:8px;font-size:17px;font-weight:600;
   border:0;background:var(--accent);color:var(--accent-fg);padding:0 16px}
 .main.stop{border:1px solid var(--red-b);background:var(--red-bg);color:var(--red)}
+.main.neutral{border:1px solid var(--chip-b);background:var(--chip);color:var(--fg)}
 .slide{position:relative;height:64px;border-radius:32px;background:var(--slide);display:flex;align-items:center;overflow:hidden;touch-action:pan-y;user-select:none;-webkit-user-select:none}
 .slide .fill{position:absolute;left:0;top:0;bottom:0;width:64px;border-radius:32px;background:var(--slide-fill);transition:width .25s ease}
 .slide .knob{position:absolute;left:4px;top:4px;width:56px;height:56px;border-radius:28px;border:0;background:var(--slide-knob);color:var(--slide-knob-fg);
@@ -2406,6 +2410,11 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
           setClass(r.mainBtn, 'main stop');
           setIcon(r.mainIcon, 'stop', 20, 2.2);
           setText(r.mainLabel, busy === 'stop' ? tr(lang, 'stopping') : tr(lang, 'stop'));
+        } else if (m.cat === 'fault') {
+          // after a protection trip: a quiet retry, not the green "charge" call to action
+          setClass(r.mainBtn, 'main neutral');
+          setIcon(r.mainIcon, 'restore', 20, 2.2);
+          setText(r.mainLabel, busy === 'start' ? tr(lang, 'starting') : tr(lang, 'retry'));
         } else {
           setClass(r.mainBtn, 'main');
           setIcon(r.mainIcon, 'play', 20, 2.2);
@@ -2821,11 +2830,14 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
         const s = e.buckets[i];
         const future = b.start > now;
         let fb = 0;
-        // Рік: months HA has no statistics for fall back to the charger's own counter (not split by zone).
+        // Рік: what HA has no statistics for falls back to the charger's own counter (not split by zone):
+        // whole months before the install, and the part of the install month before HA started counting.
         // The device keeps Jan..Dec slots: up to the current month they are this year, after it last year.
-        if (rg.period === 'year' && !s.has && !future && m.months && m.curMonth >= 1 && m.curMonth <= 12) {
+        if (rg.period === 'year' && !future && m.months && m.curMonth >= 1 && m.curMonth <= 12) {
           const mine = (b.year === rg.nowYear && b.month <= m.curMonth) || (b.year === rg.nowYear - 1 && b.month > m.curMonth);
-          if (mine) fb = Math.max(0, finite(m.months[b.month - 1], 0));
+          const counted = s.has ? finite(s.day, 0) + finite(s.night, 0) : 0;
+          const rest = mine ? finite(m.months[b.month - 1], 0) - counted : 0;
+          if (rest >= 0.05) fb = rest; // ignore rounding slivers
         }
         return { day: s.day, night: s.night, cost: s.hasCost ? s.cost : null, fb, has: s.has, future, cur: b.start <= now && now < b.end };
       });
@@ -3067,6 +3079,7 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
 .tm-go{flex:1;min-width:0;height:44px;border-radius:22px;border:0;background:var(--slide-knob);color:var(--slide-knob-fg);font-size:15px;font-weight:600;
   display:flex;align-items:center;justify-content:center;gap:6px;padding:0 12px}
 .tm-go span:last-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-go.neutral{background:var(--chip);color:var(--fg)}
 .tm-o{flex:none;width:44px;height:44px;border-radius:22px;border:0;background:var(--chip);color:var(--fg);display:flex;align-items:center;justify-content:center;padding:0}
 `;
 
@@ -3373,7 +3386,9 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
       setAttr(r.mInfo2, 'aria-label', name + ': ' + pill.text + (sub ? ', ' + big + ' ' + sub : ', ' + big));
       const sel = this._selection(m);
       const dur = sel > 0 ? fmtDur(lang, sel) : tr(lang, 'no_limit_l');
-      setText(r.mGoT, busy === 'start' ? tr(lang, 'starting') : sel > 0 ? tr(lang, 'charge_n', { d: fmtDur(lang, sel) }) : tr(lang, 'start'));
+      setClass(r.mGo, 'tm-go' + (m.cat === 'fault' ? ' neutral' : ''));
+      setText(r.mGoT, busy === 'start' ? tr(lang, 'starting') : m.cat === 'fault' ? tr(lang, 'retry')
+        : sel > 0 ? tr(lang, 'charge_n', { d: fmtDur(lang, sel) }) : tr(lang, 'start'));
       setDisabled(r.mGo, m.offline || !!busy || (sel === 0 && !this._map['switch.charging']));
       setAttr(r.mOther, 'aria-label', tr(lang, 'other_time', { d: dur }));
       setAttr(r.mOther, 'title', tr(lang, 'other_time', { d: dur }));

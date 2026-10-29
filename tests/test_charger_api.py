@@ -445,3 +445,11 @@ def test_protocol_constants_match_the_cloud() -> None:
     assert api._base_url == "https://electros.org.ua/auth/"
     assert (charger_api.DEFAULT_LOCAL_PORT, charger_api.DEFAULT_LOCAL_WS_PATH) == (80, "/ws")
     assert protocol.build_status(LOGIN) == f"site {LOGIN}"
+
+
+async def test_command_counts_as_sent_when_the_server_closes_after_it() -> None:
+    """EOF instead of a reply after the frame is written: still sent (docs/protocol.md)."""
+    server = FakeServer(frames=[], eof=True)
+    with server.patch():
+        assert await local_api().stop_charging() is True
+    assert sent_texts(server) == [f"site {LOGIN}\nstop"]

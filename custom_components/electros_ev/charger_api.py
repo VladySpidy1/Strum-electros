@@ -189,11 +189,13 @@ class ElectroSApi:
             writer.write(_encode_text_frame(message))
             await writer.drain()
 
+            # The frame is on the wire now: a missing reply (timeout, or the server
+            # closing the connection) does not undo it, see docs/protocol.md.
             try:
                 return await asyncio.wait_for(
                     _read_text_frame(reader), timeout=reply_timeout
                 )
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
                 return None
         finally:
             writer.close()

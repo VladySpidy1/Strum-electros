@@ -133,7 +133,8 @@ class BoostState:
 
     * time: ``end`` is the end of a "charge for N minutes";
     * energy: ``target_kwh`` set, ``end`` None; ends when ``delivered_kwh``
-      reaches the target or at ``deadline``;
+      reaches the target, after the car took no current for a while
+      (``idle_since``) or at ``deadline``;
     * unlimited: ``end`` None, bypass until charging stops.
 
     ``restore`` records that HA disabled the device timer for this boost.
@@ -149,6 +150,7 @@ class BoostState:
     delivered_kwh: float = 0.0
     deadline: datetime | None = None
     amps: int | None = None
+    idle_since: datetime | None = None
 
     @property
     def mode(self) -> str:
@@ -203,6 +205,7 @@ class BoostState:
             "delivered_kwh": self.delivered_kwh,
             "deadline": _dt_to_str(self.deadline),
             "amps": self.amps,
+            "idle_since": _dt_to_str(self.idle_since),
         }
 
     @classmethod
@@ -242,6 +245,7 @@ class BoostState:
             delivered_kwh=_kwh_total(data.get("delivered_kwh")) if target is not None else 0.0,
             deadline=deadline,
             amps=amps or None,
+            idle_since=_dt_from_str(data.get("idle_since")) if target is not None else None,
         )
 
 

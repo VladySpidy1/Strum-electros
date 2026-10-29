@@ -821,3 +821,115 @@ async def test_boost_button_during_energy_boost_switches_to_time(
     assert (attrs["mode"], attrs["minutes"], attrs["target_kwh"]) == ("time", 30, None)
     assert dt_util.parse_datetime(value) == start + timedelta(minutes=30)
     assert entry.runtime_data.update_interval == timedelta(seconds=60)
+
+
+# --------------------------------------------------------------------------- #
+# Q13: the car stops taking current before the energy target
+# --------------------------------------------------------------------------- #
+
+
+async def test_energy_boost_ends_when_the_car_takes_no_current(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """Battery full at 1 of 10 kWh: after 10 min without current the boost ends and
+    the night timer comes back instead of waiting for the safety deadline."""
+    start = local_dt(*WED_18H)
+    freezer.move_to(start)
+    entry = await async_setup_entry(hass, charger)
+    await async_call(hass, "charge_energy", kwh=10)
+    assert charger.take_calls() == [("disable_timer",), ("start", 16)]
+
+    _kwh(charger, 26.8)
+    freezer.move_to(start + timedelta(minutes=5))
+    await async_poll(hass, entry)
+    assert boost_state(hass)[1]["delivered_kwh"] == 1.0
+
+    charger.status = "1"  # the car stopped taking current
+    freezer.move_to(start + timedelta(minutes=6))
+    await async_poll(hass, entry)
+    freezer.move_to(start + timedelta(minutes=15))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+    assert boost_state(hass)[1]["active"] is True
+
+    freezer.move_to(start + timedelta(minutes=16, seconds=1))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("stop",), ("set_timer", "23:00", "07:00")]
+    _, attrs = boost_state(hass)
+    assert attrs["active"] is False
+    assert attrs["last_error"] is None
+    assert entry.runtime_data.update_interval == timedelta(seconds=60)
+
+
+async def test_energy_boost_idle_clock_restarts_when_the_car_draws_again(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """A pause (status 2 at 0 W counts as idle) shorter than 10 min does not end it."""
+    start = local_dt(*WED_18H)
+    freezer.move_to(start)
+    entry = await async_setup_entry(hass, charger)
+    await async_call(hass, "charge_energy", kwh=10)
+    charger.take_calls()
+
+    charger.power_raw = 0  # status 2, but the car draws nothing
+    freezer.move_to(start + timedelta(minutes=1))
+    await async_poll(hass, entry)
+    charger.power_raw = 36340  # drawing again after 8 min
+    freezer.move_to(start + timedelta(minutes=9))
+    await async_poll(hass, entry)
+    charger.power_raw = 0
+    freezer.move_to(start + timedelta(minutes=12))
+    await async_poll(hass, entry)
+    freezer.move_to(start + timedelta(minutes=20))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+    assert boost_state(hass)[1]["active"] is True
+
+    freezer.move_to(start + timedelta(minutes=22, seconds=1))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("stop",), ("set_timer", "23:00", "07:00")]
+
+
+async def test_energy_boost_idle_end_inside_the_night_window_does_not_stop(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """Like Q8: inside the restored window the schedule takes over, no stop is sent."""
+    start = local_dt(*WED_2330)
+    freezer.move_to(start)
+    entry = await async_setup_entry(hass, charger)
+    await async_call(hass, "charge_energy", kwh=10)
+    charger.take_calls()
+
+    charger.status = "1"
+    freezer.move_to(start + timedelta(minutes=1))
+    await async_poll(hass, entry)
+    freezer.move_to(start + timedelta(minutes=11, seconds=1))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("set_timer", "23:00", "07:00")]
+    assert boost_state(hass)[1]["active"] is False
+
+
+async def test_infinity_while_the_schedule_charges_bypasses_the_window_end(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """∞ while charging inside the night window: the timer is disabled so 07:00 does
+    not stop the car; it comes back when charging stops."""
+    start = local_dt(*WED_2330)
+    freezer.move_to(start)
+    charger.status = "2"
+    entry = await async_setup_entry(hass, charger)
+
+    await async_switch(hass, "charging", True)
+    assert charger.take_calls() == [("disable_timer",), ("start", 16)]
+    _, attrs = boost_state(hass)
+    assert attrs["mode"] == "unlimited"
+
+    freezer.move_to(local_dt(2026, 10, 29, 7, 30))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+    assert state(hass, "switch", "charging").state == "on"
+
+    charger.status = "1"  # done
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("set_timer", "23:00", "07:00")]
+    assert boost_state(hass)[1]["active"] is False

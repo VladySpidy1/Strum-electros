@@ -90,6 +90,8 @@ FOLLOWUP_REFRESH_DELAY = 10  # s, one more refresh after a command
 ADOPT_GRACE = 120  # s after HA's own timer write during which polls never adopt
 START_CHECK_WINDOW = 120  # s after a start during which status 4 is reported
 UNLIMITED_START_GRACE = timedelta(minutes=15)  # unlimited bypass that never charged
+ENERGY_IDLE_END = timedelta(minutes=10)  # energy boost: car took no current this long -> end
+IDLE_POWER_W = 100  # below this the car is not really taking current
 # s, coalesced saves for frequently changing values (session, tariff, energy
 # boost). Shorter than the fastest poll: Store.async_delay_save is a debounce.
 SAVE_DELAY = 10
@@ -101,6 +103,7 @@ ERROR_STOP_FAILED = "stop_failed"
 # How _async_end_boost re-checks that the boost should still end.
 _CHECK_EXPIRY = "expiry"  # the scheduled end/deadline has really passed
 _CHECK_TARGET = "target"  # the energy target is still reached
+_CHECK_IDLE = "idle"  # the car still takes no current
 
 _STATUSES_WITHOUT_INFO = {protocol.STATUS_OFFLINE, protocol.STATUS_UNKNOWN}
 
@@ -330,6 +333,7 @@ class ElectroSCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if status not in _STATUSES_WITHOUT_INFO:
             self._check_after_start(status)
             self._track_unlimited(status)
+            self._track_energy_idle(status, data.get("charging_power_w"))
             self._check_pending_stop(status)
         if not self._started or not data.get("timer_known", False):
             return
@@ -401,8 +405,9 @@ class ElectroSCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not session.active:
                 session.active = True
                 session.started_at = dt_util.utcnow()
-                session.kwh = 0.0
-                session.cost = 0.0
+                # Energy only flows while charging: this poll's delta is the session's.
+                session.kwh = round(max(delta, 0.0), 6)
+                session.cost = round(cost if delta > 0 else 0.0, 6)
                 self._save_soon()
             else:
                 _accumulate()
@@ -428,6 +433,43 @@ class ElectroSCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     boost, stop=True, reason="energy target reached", check=_CHECK_TARGET
                 ),
                 "energy target",
+            )
+
+    @callback
+    def _track_energy_idle(self, status: str, power: Any) -> None:
+        """End an energy boost once the car has taken no current for ENERGY_IDLE_END.
+
+        A full battery (or a car that never started) would otherwise keep the
+        night timer disabled until the safety deadline.
+        """
+        boost = self.stored.boost
+        if boost is None or not boost.is_energy or self._ending_boost:
+            return
+        drawing = status == protocol.STATUS_CHARGING and (
+            not isinstance(power, (int, float)) or power >= IDLE_POWER_W
+        )
+        now = dt_util.utcnow()
+        if drawing:
+            if boost.idle_since is not None or not boost.charging_seen:
+                boost.idle_since = None
+                boost.charging_seen = True
+                self._save_soon()
+            return
+        if boost.idle_since is None:
+            boost.idle_since = now
+            self._save_soon()
+            return
+        if now - boost.idle_since >= ENERGY_IDLE_END:
+            self._ending_boost = True
+            self._create_task(
+                self._async_end_boost(
+                    boost,
+                    stop=True,
+                    reason="the car took no current for 10 min",
+                    check=_CHECK_IDLE,
+                    keep_if_window_allows=True,
+                ),
+                "energy idle",
             )
 
     @callback
@@ -835,6 +877,11 @@ class ElectroSCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return
             elif check == _CHECK_TARGET and not boost.target_reached:
                 return  # the target was raised meanwhile
+            elif check == _CHECK_IDLE and (
+                boost.idle_since is None
+                or dt_util.utcnow() - boost.idle_since < ENERGY_IDLE_END
+            ):
+                return  # the car started taking current again
             if stop and keep_if_window_allows and self._schedule_allows_now():
                 stop = False
                 reason = f"{reason}; inside the night window, charging continues"
@@ -1132,7 +1179,11 @@ class ElectroSCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._apply_poll_interval()
                 await self._async_save()
                 _LOGGER.info("%s boost turned into an unlimited charge", boost.mode)
-            elif boost is None and self._timer_blocks_now():
+            elif boost is None and (
+                self._timer_blocks_now()
+                # ∞ while the schedule charges: without a bypass the window end stops it
+                or (self.is_charging and self._best_known_window() is not None)
+            ):
                 if not await self._async_write_window_locked(None, "manual charge"):
                     raise _command_failed("timer")
                 await asyncio.sleep(TIMER_SETTLE_DELAY)
@@ -1145,6 +1196,7 @@ class ElectroSCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     minutes=0,
                     restore=True,
                     started_at=dt_util.utcnow(),
+                    charging_seen=self.is_charging,
                     amps=amps,
                 )
                 self.stored.seeded = True

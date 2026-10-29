@@ -671,7 +671,8 @@ await test('waiting for vehicle / blocked / fault / offline states', () => {
   ok(q(f, 'ring').classList.contains('fault'), 'red ring');
   eq(txt(f, 'ringValue'), 'Зупинено');
   eq(txt(f, 'ringSub'), 'Спрацював захист від витоку');
-  eq(txt(f, 'mainLabel'), 'Зарядити 30 хв');
+  eq(txt(f, 'mainLabel'), 'Спробувати ще раз');
+  ok(q(f, 'mainBtn').classList.contains('neutral'), 'retry is a quiet button, not the green call to action');
   ok(!q(f, 'mainBtn').disabled, 'retry allowed');
   eq(txt(f, 'nightLine'), 'вимкнено — можна заряджати будь-коли');
 
@@ -876,6 +877,8 @@ await test('tiles: small/medium content and actions', () => {
   eq(info && info.entityId, 'sensor.electros_dev_charging_status');
   const f = mk('electros-tile', { device_id: 'dev_fault', size: 'medium' });
   ok(q(f, 'mInfo2').classList.contains('col') && q(f, 'mBig').classList.contains('red'), 'fault stacked + red');
+  eq(txt(f, 'mGoT'), 'Спробувати ще раз');
+  ok(q(f, 'mGo').classList.contains('neutral') && !q(f, 'mGo').disabled, 'tile retry is quiet but allowed');
   const o = mk('electros-tile', { device_id: 'dev_offline', size: 'medium' });
   ok(q(o, 'mGo').disabled, 'offline tile disabled');
 });
@@ -1079,6 +1082,7 @@ const withNow = (deltaMs, fn) => {
 await test('energy mode: "Час | Енергія", kWh chips, charge_energy from the button and the slide', async () => {
   const { mock, mk } = setup();
   const f = mk('electros-card', { device_id: 'dev_fault' }); // night timer off -> plain start button
+  mock.setState(mock.entityId('dev_fault', 'sensor', 'status'), 'vehicle_connected_idle'); // fault cleared
   ok(shown(f, 'modeSeg'), 'mode switch shown');
   eq(txt(f, 'segTimeT') + '|' + txt(f, 'segEnergyT'), 'Час|Енергія');
   eq(q(f, 'segTime').getAttribute('aria-pressed'), 'true');
@@ -1362,12 +1366,15 @@ await test('statistics: Рік falls back to sensor.month_energy.months (hatched
   const fbCols = () => q(el, 'plot').children.map((c, i) => (c.querySelector('.f') ? i + 1 : 0)).filter(Boolean).join(',');
   const months = mock.hass.states[mock.entityId('dev_fresh', 'sensor', 'month_energy')].attributes.months;
   const cm = curMonth;
-  eq(fbCols(), Array.from({ length: cm - 1 }, (_, i) => i + 1).join(','), 'this year: the months before installation');
+  // the months before installation, plus the part of the install month HA did not count yet
+  eq(fbCols(), Array.from({ length: cm }, (_, i) => i + 1).join(','), 'this year: before installation + the rest of the install month');
   if (cm > 1) {
     const lg = q(el, 'legend').children;
     eq(lg.length, 3, 'third legend item');
     eq(lg[2].children[1].textContent, 'Без розбивки');
-    eq(lg[2].children[2].textContent, k1(months.slice(0, cm - 1).reduce((a, v) => a + v, 0)) + ' кВт·год');
+    const total = parseFloat(lg[2].children[2].textContent.replace(/[^0-9,.-]/g, '').replace(',', '.'));
+    const before = months.slice(0, cm - 1).reduce((a, v) => a + v, 0);
+    ok(total > before && total <= before + months[cm - 1] + 0.05, 'unsplit total covers earlier months and part of this one: ' + total);
     q(el, 'plot').dispatchEvent(new MEv('click', { clientX: 2, bubbles: true }));
     ok(txt(el, 'statRead').includes('лічильник зарядки, без розбивки на тарифи'), 'readout explains ' + txt(el, 'statRead'));
   }
@@ -1502,7 +1509,7 @@ await test('card source: classic script, no imports / network / CDN', () => {
   ok(!/<script|<link|@import|cdn\.|unpkg|jsdelivr|googleapis/i.test(src), 'no external resources');
   ok(!/\blit\b|LitElement/.test(src), 'plain HTMLElement, no lit');
   const urls = src.match(/https?:\/\/[^\s'"`)]+/g) || [];
-  ok(urls.every((u) => u.startsWith('https://github.com/podzolkov/')), 'only the docs URL: ' + urls.join(' '));
+  ok(urls.every((u) => u.startsWith('https://github.com/VladySpidy1/Strum-electros')), 'only the docs URL: ' + urls.join(' '));
 });
 
 const failed = results.filter((r) => !r[0]);
