@@ -26,6 +26,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             ElectroSBoostButton(coordinator),
+            ElectroSBoostEnergyButton(coordinator),
             ElectroSResetEnergyButton(coordinator),
         ]
     )
@@ -44,6 +45,21 @@ class ElectroSBoostButton(ElectroSEntity, ButtonEntity):
         """Start the boost."""
         _LOGGER.info("Boost requested (%d min)", self.coordinator.stored.boost_minutes)
         await self.coordinator.async_boost()
+
+
+class ElectroSBoostEnergyButton(ElectroSEntity, ButtonEntity):
+    """Charge now until number.boost_kwh were delivered."""
+
+    _attr_icon = "mdi:battery-charging-high"
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "boost_energy")
+
+    async def async_press(self) -> None:
+        """Start the energy boost."""
+        _LOGGER.info("Energy boost requested (%d kWh)", self.coordinator.stored.boost_kwh)
+        await self.coordinator.async_boost_energy()
 
 
 class ElectroSResetEnergyButton(ElectroSEntity, ButtonEntity):

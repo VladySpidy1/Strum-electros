@@ -9,22 +9,26 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
+from . import protocol
 from .charger_api import ElectroSApi
 from .const import (
     CONF_CHARGER_LOGIN,
     CONF_CHARGER_PASSWORD,
     CONF_HOST,
     CONF_SCAN_INTERVAL,
+    CONF_TARIFF_NIGHT_END,
+    CONF_TARIFF_NIGHT_START,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_TARIFF_NIGHT_END,
+    DEFAULT_TARIFF_NIGHT_START,
     DOMAIN,
 )
 from .coordinator import ElectroSCoordinator
 from .frontend import async_register_card
 from .services import async_setup_services
-from .storage import STORAGE_VERSION, storage_key
+from .storage import create_store
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +52,14 @@ def entry_option(entry: ConfigEntry, key: str, default=None):
     return entry.data.get(key, default)
 
 
+def entry_hhmm_option(entry: ConfigEntry, key: str, default: str) -> str:
+    """An HH:MM option (the time selector stores HH:MM:SS); default if invalid."""
+    try:
+        return protocol.parse_hhmm(entry_option(entry, key, default))
+    except ValueError:
+        return default
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up services and the Lovelace card (once per Home Assistant run)."""
     async_setup_services(hass)
@@ -69,8 +81,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ElectroSConfigEntry) -> 
             "Cloud mode needs the charger password; set a local host in the options"
         )
 
+    tariff_window = (
+        entry_hhmm_option(entry, CONF_TARIFF_NIGHT_START, DEFAULT_TARIFF_NIGHT_START),
+        entry_hhmm_option(entry, CONF_TARIFF_NIGHT_END, DEFAULT_TARIFF_NIGHT_END),
+    )
+
     api = ElectroSApi(login=login, password=password, host=host)
-    coordinator = ElectroSCoordinator(hass, entry, api, scan_interval)
+    coordinator = ElectroSCoordinator(hass, entry, api, scan_interval, tariff_window)
     await coordinator.async_load()
     await coordinator.async_config_entry_first_refresh()
 
@@ -83,7 +100,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ElectroSConfigEntry) -> 
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ElectroSConfigEntry) -> None:
-    """Reload when the options (host, scan interval) change."""
+    """Reload when the options (host, scan interval, tariff zone) change."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -97,4 +114,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ElectroSConfigEntry) ->
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Delete the persisted state when the entry is removed."""
-    await Store(hass, STORAGE_VERSION, storage_key(entry.entry_id)).async_remove()
+    await create_store(hass, entry.entry_id).async_remove()

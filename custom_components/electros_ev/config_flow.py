@@ -18,15 +18,21 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    TimeSelector,
 )
 
+from . import protocol
 from .charger_api import ElectroSApi
 from .const import (
     CONF_CHARGER_LOGIN,
     CONF_CHARGER_PASSWORD,
     CONF_HOST,
     CONF_SCAN_INTERVAL,
+    CONF_TARIFF_NIGHT_END,
+    CONF_TARIFF_NIGHT_START,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_TARIFF_NIGHT_END,
+    DEFAULT_TARIFF_NIGHT_START,
     DOMAIN,
     MAX_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
@@ -49,6 +55,13 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _hhmm_or(value: Any, default: str) -> str:
+    try:
+        return protocol.parse_hhmm(value)
+    except ValueError:
+        return default
 
 
 async def _async_can_connect(login: str, password: str, host: str) -> bool:
@@ -122,7 +135,7 @@ class ElectroSConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class ElectroSOptionsFlow(OptionsFlow):
-    """Change the local host and the scan interval (the entry reloads)."""
+    """Change the local host, the scan interval and the tariff night zone (reloads)."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -135,13 +148,29 @@ class ElectroSOptionsFlow(OptionsFlow):
             CONF_SCAN_INTERVAL,
             entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
         )
+        current_night_start = _hhmm_or(
+            entry.options.get(CONF_TARIFF_NIGHT_START), DEFAULT_TARIFF_NIGHT_START
+        )
+        current_night_end = _hhmm_or(
+            entry.options.get(CONF_TARIFF_NIGHT_END), DEFAULT_TARIFF_NIGHT_END
+        )
 
         if user_input is not None:
             host = _clean(user_input.get(CONF_HOST))
             scan_interval = user_input.get(CONF_SCAN_INTERVAL, current_interval)
+            night_start = _hhmm_or(
+                user_input.get(CONF_TARIFF_NIGHT_START, current_night_start), ""
+            )
+            night_end = _hhmm_or(user_input.get(CONF_TARIFF_NIGHT_END, current_night_end), "")
             password = entry.data.get(CONF_CHARGER_PASSWORD) or ""
             if not host and not password:
                 errors[CONF_HOST] = "password_required"
+            elif not night_start:
+                errors[CONF_TARIFF_NIGHT_START] = "invalid_time"
+            elif not night_end:
+                errors[CONF_TARIFF_NIGHT_END] = "invalid_time"
+            elif night_start == night_end:
+                errors[CONF_TARIFF_NIGHT_END] = "tariff_zero_length"
             else:
                 ok = True
                 if host != current_host:
@@ -154,7 +183,12 @@ class ElectroSOptionsFlow(OptionsFlow):
                         ok = False
                 if ok:
                     return self.async_create_entry(
-                        data={CONF_HOST: host, CONF_SCAN_INTERVAL: scan_interval}
+                        data={
+                            CONF_HOST: host,
+                            CONF_SCAN_INTERVAL: scan_interval,
+                            CONF_TARIFF_NIGHT_START: night_start,
+                            CONF_TARIFF_NIGHT_END: night_end,
+                        }
                     )
                 errors["base"] = "cannot_connect"
 
@@ -165,6 +199,10 @@ class ElectroSOptionsFlow(OptionsFlow):
                     description={"suggested_value": current_host},
                 ): str,
                 vol.Optional(CONF_SCAN_INTERVAL, default=current_interval): _SCAN_INTERVAL,
+                vol.Optional(
+                    CONF_TARIFF_NIGHT_START, default=current_night_start
+                ): TimeSelector(),
+                vol.Optional(CONF_TARIFF_NIGHT_END, default=current_night_end): TimeSelector(),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

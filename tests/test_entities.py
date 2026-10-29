@@ -21,6 +21,7 @@ from custom_components.electros_ev import frontend as electros_frontend, protoco
 from custom_components.electros_ev.const import DOMAIN
 
 from .common import (
+    ENTITY_OBJECT_IDS,
     EXPECTED_ENTITIES,
     LOGIN,
     SECRETS,
@@ -78,6 +79,29 @@ async def test_entity_names_come_from_translations(
     )
 
 
+async def test_entity_ids_of_a_new_install(hass: HomeAssistant, charger: FakeCharger) -> None:
+    """The ids README.md and examples/ document (``<domain>.electros_<login>_<name>``)."""
+    await async_setup_entry(hass, charger)
+    assert set(ENTITY_OBJECT_IDS) == set(EXPECTED_ENTITIES)
+    for (domain, key), object_id in ENTITY_OBJECT_IDS.items():
+        assert entity_id(hass, domain, key) == f"{domain}.electros_{LOGIN.lower()}_{object_id}"
+
+
+async def test_entity_ids_stay_english_in_a_ukrainian_ui(
+    hass: HomeAssistant, charger: FakeCharger
+) -> None:
+    """Names are translated, entity ids are not (uk and ru are not native-id languages)."""
+    hass.config.language = "uk"
+    await async_setup_entry(hass, charger)
+    assert entity_id(hass, "sensor", "boost_end") == f"sensor.electros_{LOGIN.lower()}_boost_ends"
+    assert entity_id(hass, "switch", "weekend_free") == (
+        f"switch.electros_{LOGIN.lower()}_free_charging_on_weekends"
+    )
+    ukrainian = json.loads((COMPONENT / "translations" / "uk.json").read_text(encoding="utf-8"))
+    name = ukrainian["entity"]["sensor"]["boost_end"]["name"]
+    assert state(hass, "sensor", "boost_end").name == f"ElectroS {LOGIN} {name}"
+
+
 async def test_sensor_values(hass: HomeAssistant, charger: FakeCharger) -> None:
     await async_setup_entry(hass, charger)
 
@@ -130,6 +154,9 @@ async def test_sensor_values(hass: HomeAssistant, charger: FakeCharger) -> None:
     assert boost_end.attributes["active"] is False
     assert boost_end.attributes["unlimited"] is False
     assert boost_end.attributes["minutes"] == 0
+    for key in ("mode", "target_kwh", "delivered_kwh", "deadline", "last_error"):
+        assert boost_end.attributes[key] is None, key
+    assert session.attributes["cost"] is None  # no session seen by HA yet
 
 
 async def test_control_entities_initial_state(hass: HomeAssistant, charger: FakeCharger) -> None:
@@ -152,7 +179,11 @@ async def test_control_entities_initial_state(hass: HomeAssistant, charger: Fake
     )
     assert state(hass, "time", "timer_start").state == "23:00:00"
     assert state(hass, "time", "timer_end").state == "07:00:00"
+    assert state(hass, "number", "boost_kwh").state == "10.0"
+    assert state(hass, "number", "price_day").state == "4.32"
+    assert state(hass, "number", "price_night").state == "2.16"
     assert state(hass, "button", "boost").state == STATE_UNKNOWN
+    assert state(hass, "button", "boost_energy").state == STATE_UNKNOWN
     assert state(hass, "button", "reset_energy").state == STATE_UNKNOWN
     assert charger.calls == []
 
@@ -213,6 +244,7 @@ async def test_unreachable_charger(hass: HomeAssistant, charger: FakeCharger) ->
         ("sensor", "energy"),
         ("switch", "charging"),
         ("button", "boost"),
+        ("button", "boost_energy"),
     ]:
         assert state(hass, domain, key).state == STATE_UNAVAILABLE, key
     for domain, key in [
@@ -223,6 +255,13 @@ async def test_unreachable_charger(hass: HomeAssistant, charger: FakeCharger) ->
         ("time", "timer_start"),
         ("time", "timer_end"),
         ("sensor", "boost_end"),
+        ("number", "boost_kwh"),
+        ("number", "price_day"),
+        ("number", "price_night"),
+        ("sensor", "energy_day_tariff"),
+        ("sensor", "energy_night_tariff"),
+        ("sensor", "energy_cost"),
+        ("sensor", "current_price"),
     ]:
         assert state(hass, domain, key).state != STATE_UNAVAILABLE, key
 

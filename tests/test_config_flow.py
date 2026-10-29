@@ -178,7 +178,12 @@ async def test_options_switch_to_local_host_reloads(
         await hass.async_block_till_done(wait_background_tasks=True)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {"host": HOST, "scan_interval": 120}
+    assert entry.options == {
+        "host": HOST,
+        "scan_interval": 120,
+        "tariff_night_start": "23:00",
+        "tariff_night_end": "07:00",
+    }
     assert flow_api.call_args.kwargs == {"login": LOGIN, "password": PASSWORD, "host": HOST}
     # Reloaded with the new settings.
     assert entry.state is ConfigEntryState.LOADED
@@ -197,7 +202,12 @@ async def test_options_interval_only_skips_connection_test(
         )
         await hass.async_block_till_done(wait_background_tasks=True)
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {"host": "", "scan_interval": 300}
+    assert entry.options == {
+        "host": "",
+        "scan_interval": 300,
+        "tariff_night_start": "23:00",
+        "tariff_night_end": "07:00",
+    }
     flow_api.assert_not_called()
     assert entry.runtime_data.update_interval == timedelta(seconds=300)
 
@@ -224,7 +234,7 @@ async def test_options_local_entry_cannot_drop_host(
     await async_setup_entry(hass, charger, entry)
     result = await hass.config_entries.options.async_init(entry.entry_id)
     schema_keys = {str(key) for key in result["data_schema"].schema}
-    assert schema_keys == {"host", "scan_interval"}
+    assert schema_keys == {"host", "scan_interval", "tariff_night_start", "tariff_night_end"}
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {"host": "", "scan_interval": 60}
     )

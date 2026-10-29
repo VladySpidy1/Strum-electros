@@ -1,0 +1,230 @@
+# Струм (ElectroS) — приклади автоматизацій для двозонного тарифу (вставляються в automations.yaml
+# або по одній: Налаштування → Автоматизації → Створити → ⋮ → Редагувати в YAML).
+#
+# Перед використанням замініть:
+#   es123456                → ваш логін зарядки малими літерами. Home Assistant будує id так:
+#                             sensor.electros_<логін>_status (англійські назви навіть в українському
+#                             інтерфейсі). Точні id: Налаштування → Пристрої → ElectroS <логін>.
+#   notify.mobile_app_phone → сервіс сповіщень вашого телефона з Companion app
+#                             (notify.mobile_app_<ім'я пристрою>).
+#   input_boolean.electros_*, input_number.electros_* → помічники з examples/configuration.yaml.
+#   calendar.ukraine        → календар свят (інтеграція Holiday / «Свята», країна Україна);
+#                             перевірте його id.
+#
+# Сервісам electros_ev.* потрібен device_id; його дає будь-яка сутність зарядки:
+#   device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+
+# 1. Авто підключили вдень: сповіщення з кнопками «30 хв», «10 кВт·год», «Чекати ночі».
+#    Нічний таймер вдень зарядку не дозволяє — кнопка заряджає одразу, за дорогим тарифом.
+- id: electros_car_plugged_in_day
+  alias: "ElectroS: авто підключено вдень — запитати"
+  description: >-
+    Вдень (дорожчий тариф) нічний таймер зарядку не дозволяє. Сповіщення пропонує
+    зарядити зараз 30 хв або 10 кВт·год, або дочекатися нічного тарифу.
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: sensor.electros_es123456_status
+      from: waiting_for_vehicle
+      to:
+        - vehicle_connected_idle
+        - charging_blocked
+  conditions:
+    - condition: state
+      entity_id: sensor.electros_es123456_current_price
+      attribute: zone
+      state: day
+    - condition: state
+      entity_id: switch.electros_es123456_night_timer
+      state: "on"
+  actions:
+    - action: notify.mobile_app_phone
+      data:
+        title: ElectroS
+        message: >-
+          Авто підключено вдень — зарядити 30 хв / 10 кВт·год?
+          Зараз {{ states('sensor.electros_es123456_current_price') }}
+          {{ state_attr('sensor.electros_es123456_current_price', 'unit_of_measurement') }},
+          нічний тариф з {{ state_attr('sensor.electros_es123456_current_price', 'night_start') }}.
+        data:
+          tag: electros-plugged-in
+          actions:
+            - action: ELECTROS_CHARGE_30_MIN
+              title: "30 хв"
+            - action: ELECTROS_CHARGE_10_KWH
+              title: "10 кВт·год"
+            - action: ELECTROS_WAIT_NIGHT
+              title: "Чекати ночі"
+
+# 2. Обробка кнопок сповіщення (подія mobile_app_notification_action з Companion app).
+#    Окрема автоматизація переживає перезапуск HA, на відміну від wait_for_trigger.
+- id: electros_notification_actions
+  alias: "ElectroS: кнопки сповіщення"
+  mode: queued
+  triggers:
+    - trigger: event
+      event_type: mobile_app_notification_action
+      event_data:
+        action: ELECTROS_CHARGE_30_MIN
+      id: minutes
+    - trigger: event
+      event_type: mobile_app_notification_action
+      event_data:
+        action: ELECTROS_CHARGE_10_KWH
+      id: energy
+  actions:
+    - choose:
+        - conditions:
+            - condition: trigger
+              id: minutes
+          sequence:
+            - action: electros_ev.charge_for
+              data:
+                device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+                minutes: 30
+        - conditions:
+            - condition: trigger
+              id: energy
+          sequence:
+            - action: electros_ev.charge_energy
+              data:
+                device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+                kwh: 10
+
+# 3. Буст закінчився (час, кВт·год, стоп або ∞): скільки заряджено і скільки це коштувало.
+#    Через 20 с після кінця — щоб HA встиг опитати зарядку ще раз.
+- id: electros_boost_finished
+  alias: "ElectroS: зарядку завершено"
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: sensor.electros_es123456_boost_ends
+      attribute: active
+      from: true
+      to: false
+  actions:
+    - delay: "00:00:20"
+    - variables:
+        kwh: "{{ states('sensor.electros_es123456_session_energy') | float(0) | round(2) }}"
+        cost: "{{ state_attr('sensor.electros_es123456_session_energy', 'cost') }}"
+        currency: "{{ state_attr('sensor.electros_es123456_energy_cost', 'unit_of_measurement') }}"
+        error: "{{ state_attr('sensor.electros_es123456_boost_ends', 'last_error') }}"
+        still_charging: "{{ is_state('switch.electros_es123456_charging', 'on') }}"
+    - action: notify.mobile_app_phone
+      data:
+        title: >-
+          {{ 'ElectroS: буст завершено' if still_charging else 'ElectroS: зарядку завершено' }}
+        message: >-
+          Сесія: {{ kwh }} кВт·год{% if cost is not none %}, {{ cost }} {{ currency }}{% endif %}.
+          {% if error == 'stop_failed' %}Стоп не дійшов до зарядки — HA повторить його, щойно вона відповість.
+          {% elif still_charging %}Далі заряджає за нічним таймером.{% endif %}
+          {% if error == 'energy_deadline' %}Ціль не досягнуто до страхового терміну — зарядку зупинено.{% endif %}
+        data:
+          tag: electros-finished
+
+# 4. Постійна межа на сесію: зупинити, коли за сесію заряджено N кВт·год (input_number).
+#    Для разової зарядки «до N кВт·год» простіше electros_ev.charge_energy / кнопка в картці.
+- id: electros_session_limit
+  alias: "ElectroS: стоп після N кВт·год за сесію"
+  mode: single
+  triggers:
+    - trigger: numeric_state
+      entity_id: sensor.electros_es123456_session_energy
+      above: input_number.electros_session_limit_kwh
+  conditions:
+    - condition: state
+      entity_id: switch.electros_es123456_charging
+      state: "on"
+  actions:
+    - action: electros_ev.stop_charging
+      data:
+        device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+    - action: notify.mobile_app_phone
+      data:
+        title: ElectroS
+        message: >-
+          Зупинено на {{ states('sensor.electros_es123456_session_energy') | float(0) | round(1) }}
+          кВт·год (межа {{ states('input_number.electros_session_limit_kwh') | int }}).
+
+# 5. Помилка зарядки, офлайн або HA не може зв'язатися із зарядкою.
+- id: electros_fault_or_offline
+  alias: "ElectroS: помилка або офлайн"
+  mode: queued
+  triggers:
+    - trigger: state
+      entity_id: sensor.electros_es123456_status
+      to:
+        - charging_fault
+        - mains_voltage_low
+        - charger_communication_fault
+        - leakage_current_fault
+        - overcurrent_fault
+      for: "00:01:00"
+      id: fault
+    - trigger: state
+      entity_id: sensor.electros_es123456_status
+      to: offline
+      for: "00:15:00"
+      id: offline
+    - trigger: state
+      entity_id: sensor.electros_es123456_status
+      to: unavailable
+      for: "00:15:00"
+      id: unreachable
+  actions:
+    - action: notify.mobile_app_phone
+      data:
+        title: "{{ 'ElectroS: помилка' if trigger.id == 'fault' else 'ElectroS: немає зв’язку' }}"
+        message: >-
+          {% if trigger.id == 'unreachable' %}Home Assistant не може зв'язатися із зарядкою
+          (хмара electros.org.ua, Wi-Fi або локальна IP-адреса).
+          {% else %}{{ state_translated('sensor.electros_es123456_status') }}
+          (код {{ state_attr('sensor.electros_es123456_status', 'status_code') }}).{% endif %}
+        data:
+          tag: electros-fault
+          push:
+            interruption-level: time-sensitive # iOS
+          priority: high # Android
+          ttl: 0 # Android
+
+# 6a. «Вільні вихідні» з перемикача-помічника (наприклад, для сценарію «ми вдома»).
+- id: electros_weekend_free_from_helper
+  alias: "ElectroS: вільні вихідні з input_boolean"
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: input_boolean.electros_free_weekends
+      to:
+        - "on"
+        - "off"
+    - trigger: homeassistant
+      event: start
+  actions:
+    - action: >-
+        switch.turn_{{ 'on' if is_state('input_boolean.electros_free_weekends', 'on') else 'off' }}
+      target:
+        entity_id: switch.electros_es123456_free_charging_on_weekends
+
+# 6b. Святковий день із календаря: нічний таймер вимикається на час свята (заряджати
+#     можна будь-коли) і вмикається знову після нього. Лише якщо помічник увімкнено.
+- id: electros_holiday_calendar
+  alias: "ElectroS: свята з календаря"
+  mode: queued
+  triggers:
+    - trigger: calendar
+      event: start
+      entity_id: calendar.ukraine
+      id: start
+    - trigger: calendar
+      event: end
+      entity_id: calendar.ukraine
+      id: end
+  conditions:
+    - condition: state
+      entity_id: input_boolean.electros_holidays_free
+      state: "on"
+  actions:
+    - action: electros_ev.set_timer
+      data:
+        device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+        enabled: "{{ trigger.id == 'end' }}"

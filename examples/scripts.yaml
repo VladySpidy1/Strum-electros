@@ -1,0 +1,65 @@
+# Струм (ElectroS) — скрипти для кнопок на дашборді, віджетів Companion app і Siri / Google Assistant.
+# Вставляються в scripts.yaml (або Налаштування → Скрипти → Створити → ⋮ → Редагувати в YAML).
+# Замініть es123456 на ваш логін зарядки малими літерами (див. examples/automations.yaml).
+
+electros_charge_30_min:
+  alias: "ElectroS: зарядити 30 хв"
+  description: Зарядити зараз, оминаючи нічний таймер; потім таймер повернеться сам.
+  icon: mdi:ev-plug-type2
+  mode: single
+  fields:
+    minutes:
+      name: Хвилини
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 480
+          step: 5
+          unit_of_measurement: min
+  sequence:
+    - action: electros_ev.charge_for
+      data:
+        device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+        minutes: "{{ minutes | default(30) | int }}"
+
+electros_charge_10_kwh:
+  alias: "ElectroS: зарядити 10 кВт·год"
+  description: Зарядити зараз до 10 кВт·год (або скільки передано в kwh), потім стоп і таймер.
+  icon: mdi:battery-charging-high
+  mode: single
+  fields:
+    kwh:
+      name: кВт·год
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 80
+          step: 1
+          unit_of_measurement: kWh
+  sequence:
+    - action: electros_ev.charge_energy
+      data:
+        device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+        kwh: "{{ kwh | default(10) | float }}"
+
+electros_extend_15_min:
+  alias: "ElectroS: +15 хв"
+  icon: mdi:timer-plus-outline
+  mode: single
+  sequence:
+    - action: electros_ev.extend_charge
+      data:
+        device_id: "{{ device_id('sensor.electros_es123456_status') }}"
+        minutes: 15
+
+electros_stop:
+  alias: "ElectroS: зупинити"
+  description: Зупинити зарядку, скасувати буст і повернути нічний таймер.
+  icon: mdi:stop-circle-outline
+  mode: single
+  sequence:
+    - action: electros_ev.stop_charging
+      data:
+        device_id: "{{ device_id('sensor.electros_es123456_status') }}"

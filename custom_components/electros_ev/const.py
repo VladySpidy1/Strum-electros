@@ -42,18 +42,41 @@ MAX_BOOST_MINUTES = 480
 BOOST_MINUTES_STEP = 5
 DEFAULT_CHARGING_AMPS = 6
 
+# Energy boost ("charge N kWh")
+DEFAULT_BOOST_KWH = 10
+MIN_BOOST_KWH = 1
+MAX_BOOST_KWH = 80
+BOOST_KWH_STEP = 1
+ENERGY_BOOST_SCAN_INTERVAL = 20  # s, polling while an energy boost runs
+
+# Two-zone tariff (prices per kWh in the HA currency; the night zone is an
+# options-flow setting, independent of the charger timer)
+CONF_TARIFF_NIGHT_START = "tariff_night_start"
+CONF_TARIFF_NIGHT_END = "tariff_night_end"
+DEFAULT_TARIFF_NIGHT_START = "23:00"
+DEFAULT_TARIFF_NIGHT_END = "07:00"
+DEFAULT_PRICE_DAY = 4.32
+DEFAULT_PRICE_NIGHT = 2.16
+MIN_PRICE = 0.0
+MAX_PRICE = 100.0
+PRICE_STEP = 0.01
+
 # Services
 ATTR_DEVICE_ID = "device_id"
 ATTR_MINUTES = "minutes"
+ATTR_KWH = "kwh"
 ATTR_AMPS = "amps"
 ATTR_START = "start"
 ATTR_END = "end"
 ATTR_ENABLED = "enabled"
 SERVICE_CHARGE_FOR = "charge_for"
+SERVICE_CHARGE_ENERGY = "charge_energy"
 SERVICE_EXTEND_CHARGE = "extend_charge"
 SERVICE_STOP_CHARGING = "stop_charging"
 SERVICE_SET_TIMER = "set_timer"
 SERVICE_MAX_MINUTES = 1440
+SERVICE_MIN_KWH = 0.5
+SERVICE_MAX_KWH = 100
 
 # Frontend card
 CARD_URL = f"/{DOMAIN}/electros-card.js"

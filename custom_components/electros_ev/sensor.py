@@ -20,7 +20,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import protocol
+from . import protocol, tariff
 from .coordinator import ElectroSCoordinator
 from .entity import ElectroSEntity, ElectroSSettingEntity
 
@@ -43,6 +43,10 @@ async def async_setup_entry(
             ElectroSSessionEnergySensor(coordinator),
             ElectroSMonthEnergySensor(coordinator),
             ElectroSBoostEndSensor(coordinator),
+            ElectroSTariffEnergySensor(coordinator, tariff.ZONE_DAY),
+            ElectroSTariffEnergySensor(coordinator, tariff.ZONE_NIGHT),
+            ElectroSEnergyCostSensor(coordinator),
+            ElectroSCurrentPriceSensor(coordinator),
         ]
     )
 
@@ -195,10 +199,11 @@ class ElectroSSessionEnergySensor(ElectroSEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Session start and the device's session history (newest first)."""
+        """Session start, its cost and the device's session history (newest first)."""
         started = self.coordinator.stored.session.started_at
         return {
             "started_at": started.isoformat() if started else None,
+            "cost": self.coordinator.session_cost,
             "history": list((self.coordinator.data or {}).get("history") or []),
         }
 
@@ -234,7 +239,12 @@ class ElectroSMonthEnergySensor(ElectroSEntity, SensorEntity):
 
 
 class ElectroSBoostEndSensor(ElectroSSettingEntity, SensorEntity):
-    """When the current timed boost ends (None when no timed boost is active)."""
+    """When the current boost ends.
+
+    Timed boost: its end. Energy boost: the estimated end (remaining kWh at the
+    current power; unknown while the power is 0). Unknown for an unlimited
+    bypass or without a boost.
+    """
 
     _attr_icon = "mdi:timer-outline"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
@@ -245,17 +255,95 @@ class ElectroSBoostEndSensor(ElectroSSettingEntity, SensorEntity):
 
     @property
     def native_value(self) -> datetime | None:
-        """End of the timed boost."""
+        """End (timed) or estimated end (energy) of the boost."""
         boost = self.coordinator.boost
-        return boost.end if boost is not None else None
+        if boost is None or boost.unlimited:
+            return None
+        if boost.is_energy:
+            return self.coordinator.boost_estimated_end
+        return boost.end
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Boost details and the last start problem."""
+        """Boost details and the last start/stop problem."""
         boost = self.coordinator.boost
+        energy = boost is not None and boost.is_energy
         return {
             "active": boost is not None,
+            "mode": boost.mode if boost is not None else None,
             "unlimited": bool(boost and boost.unlimited),
             "minutes": boost.minutes if boost is not None else 0,
+            "target_kwh": boost.target_kwh if energy else None,
+            "delivered_kwh": round(boost.delivered_kwh, 3) if energy else None,
+            "deadline": boost.deadline.isoformat() if energy and boost.deadline else None,
             "last_error": self.coordinator.last_error,
+        }
+
+
+class ElectroSTariffEnergySensor(ElectroSSettingEntity, SensorEntity):
+    """Energy counted in the day or night tariff zone (HA-side running total)."""
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: ElectroSCoordinator, zone: str) -> None:
+        """Initialize."""
+        super().__init__(coordinator, f"energy_{zone}_tariff")
+        self._zone = zone
+        self._attr_icon = (
+            "mdi:weather-night" if zone == tariff.ZONE_NIGHT else "mdi:weather-sunny"
+        )
+
+    @property
+    def native_value(self) -> float:
+        """kWh in this zone since the integration started counting."""
+        state = self.coordinator.stored.tariff
+        value = state.night_kwh if self._zone == tariff.ZONE_NIGHT else state.day_kwh
+        return round(value, 3)
+
+
+class ElectroSEnergyCostSensor(ElectroSSettingEntity, SensorEntity):
+    """Cumulative cost of the charged energy, each kWh at the price of its zone."""
+
+    _attr_icon = "mdi:cash"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "energy_cost")
+        self._attr_native_unit_of_measurement = coordinator.hass.config.currency
+
+    @property
+    def native_value(self) -> float:
+        """Total cost."""
+        return round(self.coordinator.stored.tariff.cost, 2)
+
+
+class ElectroSCurrentPriceSensor(ElectroSSettingEntity, SensorEntity):
+    """Price per kWh right now (usable as the price entity of the Energy dashboard)."""
+
+    _attr_icon = "mdi:cash-clock"
+
+    def __init__(self, coordinator: ElectroSCoordinator) -> None:
+        """Initialize."""
+        super().__init__(coordinator, "current_price")
+        self._attr_native_unit_of_measurement = f"{coordinator.hass.config.currency}/kWh"
+
+    @property
+    def native_value(self) -> float:
+        """Price of the current zone."""
+        return self.coordinator.current_price
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Current zone and the night zone of the tariff."""
+        night_start, night_end = self.coordinator.tariff_window
+        return {
+            "zone": self.coordinator.tariff_zone,
+            "night_start": night_start,
+            "night_end": night_end,
         }

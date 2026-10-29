@@ -1,0 +1,75 @@
+# Струм (ElectroS) — приклад вигляду дашборда (Налаштування → Дашборди → ⋮ → Редактор сирої конфігурації,
+# або окремі картки: Редагувати дашборд → Додати картку → Вручну).
+#
+# device_id: найпростіше вибрати зарядку у візуальному редакторі картки; або відкрийте
+# Налаштування → Пристрої → ElectroS <логін> — id пристрою стоїть в адресі сторінки
+# (/config/devices/device/<device_id>).
+# Скрипти — з examples/scripts.yaml; es123456 → ваш логін малими літерами.
+
+title: ElectroS
+views:
+  - title: Зарядка
+    path: ev
+    icon: mdi:ev-station
+    cards:
+      # Повна картка: потужність, зворотний відлік, «зарядити на N хв / N кВт·год», струм,
+      # нічний тариф і статистика День · Тиждень · Місяць · Рік.
+      - type: custom:electros-card
+        device_id: 0123456789abcdef0123456789abcdef
+        theme: auto # auto | light | dark
+        quick_minutes: [15, 30, 60, 120]
+        quick_kwh: [5, 10, 20, 30]
+        stats_period: week # day | week | month | year (лише в YAML)
+        charge_mode: time # time | energy — що вибрано спочатку (лише в YAML)
+
+      # Компактні плитки для головного дашборда.
+      - type: horizontal-stack
+        cards:
+          - type: custom:electros-tile
+            device_id: 0123456789abcdef0123456789abcdef
+            size: small # small | medium
+          - type: custom:electros-tile
+            device_id: 0123456789abcdef0123456789abcdef
+            size: medium
+            quick_minutes: [30, 60]
+
+      # Кнопки-скрипти (те саме працює у віджетах Companion app).
+      - type: grid
+        columns: 3
+        square: false
+        cards:
+          - type: button
+            name: 30 хв
+            icon: mdi:ev-plug-type2
+            tap_action:
+              action: perform-action
+              perform_action: script.electros_charge_30_min
+          - type: button
+            name: 10 кВт·год
+            icon: mdi:battery-charging-high
+            tap_action:
+              action: perform-action
+              perform_action: script.electros_charge_10_kwh
+          - type: button
+            name: Стоп
+            icon: mdi:stop-circle-outline
+            tap_action:
+              action: perform-action
+              perform_action: script.electros_stop
+              confirmation:
+                text: Зупинити зарядку?
+
+      # Тариф і лічильники стандартними картками.
+      - type: entities
+        title: Тариф
+        entities:
+          - entity: sensor.electros_es123456_current_price
+          - entity: number.electros_es123456_price_day
+          - entity: number.electros_es123456_price_night
+          - entity: sensor.electros_es123456_energy_day_tariff
+          - entity: sensor.electros_es123456_energy_night_tariff
+          - entity: sensor.electros_es123456_energy_cost
+          - entity: switch.electros_es123456_night_timer
+          - entity: time.electros_es123456_night_window_start
+          - entity: time.electros_es123456_night_window_end
+          - entity: switch.electros_es123456_free_charging_on_weekends

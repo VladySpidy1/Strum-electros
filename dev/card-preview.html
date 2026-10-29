@@ -8,7 +8,8 @@
   Static preview of custom_components/electros_ev/frontend/electros-card.js with a mock hass.
   Works from file:// and from `python -m http.server` in the repo root (open /dev/card-preview.html).
   Query params: ?now=21:18 (default; "real" = real clock) · ?lang=uk|ru|en · ?theme=auto|light|dark (force all)
-  No network: no fonts, no CDN, the mock never leaves the page.
+                ?only=cards|energy|stats|tiles|empty|log (show one section, handy for screenshots)
+  No network: no fonts, no CDN, the mock never leaves the page (statistics come from the mock's hass.callWS).
 -->
 <style>
   :root { color-scheme: dark; }
@@ -42,6 +43,7 @@
     font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfd0d6; }
   #log li.note { color: #f5c46b; }
   #log li.ev { color: #8fc3ff; }
+  #log li.ws { color: #b9a6ff; }
   .empty-log { color: #777; }
 </style>
 <script src="mock-hass.js"></script>
@@ -60,32 +62,45 @@
   <label>Мова <select id="lang"><option value="uk">uk</option><option value="ru">ru</option><option value="en">en</option></select></label>
   <label>Тема <select id="theme"><option value="">як у дизайні</option><option value="auto">auto (hass dark)</option><option value="dark">усі темні</option><option value="light">усі світлі</option></select></label>
   <label>Час <select id="now"><option value="21:18">21:18 (як у макеті)</option><option value="23:40">23:40 (у вікні)</option><option value="06:50">06:50</option><option value="real">реальний</option></select></label>
+  <label>Розділ <select id="only"><option value="">усі</option><option value="cards">картки</option><option value="energy">енергія</option><option value="stats">статистика</option><option value="tiles">плитки</option><option value="empty">порожні</option><option value="log">журнал</option></select></label>
   <span class="clock" id="clock"></span>
   <span id="status" style="color:#ff8a80"></span>
 </header>
 <main>
-  <section>
+  <section data-sec="cards">
     <h2 class="sec">Повна картка · electros-card</h2>
     <div class="grid" id="cards"></div>
   </section>
-  <section>
+  <section data-sec="energy">
+    <h2 class="sec">Зарядити на N кВт·год · режим «Енергія»</h2>
+    <div class="grid" id="energy"></div>
+  </section>
+  <section data-sec="energy">
+    <h2 class="sec">Енергія · плитки · темна</h2>
+    <div class="row dark" id="tiles-energy"></div>
+  </section>
+  <section data-sec="stats">
+    <h2 class="sec">Статистика · День · Тиждень · Місяць · Рік · порожня</h2>
+    <div class="grid" id="stats"></div>
+  </section>
+  <section data-sec="tiles">
     <h2 class="sec">Плитки · electros-tile · темна</h2>
     <div class="row dark" id="tiles-dark"></div>
   </section>
-  <section>
+  <section data-sec="tiles">
     <h2 class="sec">Плитки · electros-tile · світла</h2>
     <div class="row light" id="tiles-light"></div>
   </section>
-  <section>
+  <section data-sec="tiles">
     <h2 class="sec">Плитки · інші стани</h2>
     <div class="grid" id="tiles-other"></div>
   </section>
-  <section>
+  <section data-sec="empty">
     <h2 class="sec">Порожні стани</h2>
     <div class="grid" id="empty"></div>
   </section>
-  <section>
-    <h2 class="sec">Виклики сервісів (mock)</h2>
+  <section data-sec="log">
+    <h2 class="sec">Виклики сервісів і callWS (mock)</h2>
     <ol id="log"><li class="empty-log">Натисніть щось у картці…</li></ol>
   </section>
 </main>
@@ -96,6 +111,7 @@
   var lang = params.get('lang') || 'uk';
   var forceTheme = params.get('theme') || '';
   var nowParam = params.get('now') || '21:18';
+  var only = params.get('only') || '';
 
   function bindSelect(id, value, key) {
     var el = document.getElementById(id);
@@ -109,6 +125,10 @@
   bindSelect('lang', lang, 'lang');
   bindSelect('theme', forceTheme, 'theme');
   bindSelect('now', nowParam, 'now');
+  bindSelect('only', only, 'only');
+  if (only) {
+    document.querySelectorAll('main > section').forEach(function (s) { s.hidden = s.getAttribute('data-sec') !== only; });
+  }
 
   if (!customElements.get('electros-card') || !customElements.get('electros-tile')) {
     document.getElementById('status').textContent = 'electros-card.js не завантажився — перевірте шлях ../custom_components/electros_ev/frontend/electros-card.js';
@@ -123,6 +143,11 @@
     { id: 'dev_fault', login: '10005', scenario: 'fault' },
     { id: 'dev_offline', login: '10006', scenario: 'offline' },
     { id: 'dev_unlimited', login: '10007', scenario: 'unlimited', area_id: null, name_by_user: 'Tesla <b>не HTML</b>' },
+    { id: 'dev_energy', login: '10008', scenario: 'energy' },
+    { id: 'dev_paused', login: '10009', scenario: 'energy_paused', name_by_user: 'Leaf' },
+    { id: 'dev_deadline', login: '10010', scenario: 'energy_deadline' },
+    { id: 'dev_nostats', login: '10011', scenario: 'idle_night', stats: 'none', name_by_user: 'Щойно встановлено' },
+    { id: 'dev_legacy', login: '10012', scenario: 'charging', legacy: true, name_by_user: 'Старий бекенд' },
   ];
   var mock = ElectrosMock.createMock({ lang: lang, darkMode: true, devices: DEVICES, latency: 350 });
   var elements = [];
@@ -147,14 +172,32 @@
   }
 
   var cards = document.getElementById('cards');
-  var PRICE = 2.16;
-  add(cards, 'electros-card', { device_id: 'dev_charging', theme: theme('dark'), price_per_kwh: PRICE }, '1 · заряджається, буст 30 хв · dark · ціна 2.16', 'card-w');
-  add(cards, 'electros-card', { device_id: 'dev_idle', theme: theme('light'), price_per_kwh: PRICE, quick_minutes: [15, 30, 60, 120] }, '2 · авто підключено, чекає 23:00 · light', 'card-w');
-  add(cards, 'electros-card', { device_id: 'dev_waiting', theme: theme('dark') }, '3 · чекає авто · dark · без ціни', 'card-w');
-  add(cards, 'electros-card', { device_id: 'dev_blocked', theme: theme('light'), price_per_kwh: PRICE }, '4 · заблоковано таймером (вихідні без обмежень увімк.) · light', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_charging', theme: theme('dark') }, '1 · заряджається, буст 30 хв · dark · вартість сесії з бекенду', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_idle', theme: theme('light'), price_per_kwh: 2.16, quick_minutes: [15, 30, 60, 120] }, '2 · авто підключено, чекає 23:00 · light · старий конфіг з price_per_kwh (ігнорується)', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_waiting', theme: theme('dark') }, '3 · чекає авто · dark', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_blocked', theme: theme('light') }, '4 · заблоковано таймером (вихідні без обмежень увімк.) · light', 'card-w');
   add(cards, 'electros-card', { device_id: 'dev_fault', theme: theme('dark') }, '5 · помилка: витік струму · dark', 'card-w');
   add(cards, 'electros-card', { device_id: 'dev_offline', theme: theme('light') }, '6 · офлайн · light', 'card-w');
   add(cards, 'electros-card', { device_id: 'dev_unlimited', theme: theme('auto'), quick_minutes: [30, 60, 90, 180] }, '7 · ∞ без ліміту · auto (hass.themes.darkMode=true) · name_by_user з HTML', 'card-w');
+  add(cards, 'electros-card', { device_id: 'dev_legacy', theme: theme('dark') }, '8 · бекенд без v2-сутностей: без «Час | Енергія», енергія = останні сесії', 'card-w');
+
+  var energy = document.getElementById('energy');
+  add(energy, 'electros-card', { device_id: 'dev_energy', theme: theme('dark') }, 'E1 · буст на 10 кВт·год: 4,2 з 10, ≈ кінець, +5 кВт·год · dark', 'card-w');
+  add(energy, 'electros-card', { device_id: 'dev_paused', theme: theme('light') }, 'E2 · буст на енергію, авто на паузі (0 кВт, кінець невідомий) · light', 'card-w');
+  add(energy, 'electros-card', { device_id: 'dev_deadline', theme: theme('dark'), charge_mode: 'energy' }, 'E3 · зупинено за запобіжним лімітом (last_error) · режим «Енергія» · dark', 'card-w');
+  add(energy, 'electros-card', { device_id: 'dev_idle', theme: theme('light'), charge_mode: 'energy', quick_kwh: [5, 10, 20, 30] }, 'E4 · чекає 23:00, режим «Енергія» (проведіть, щоб зарядити 10 кВт·год) · light', 'card-w');
+
+  var te = document.getElementById('tiles-energy');
+  add(te, 'electros-tile', { device_id: 'dev_energy', size: 'small', theme: theme('dark') }, 'small · буст на енергію', 'tile-s');
+  add(te, 'electros-tile', { device_id: 'dev_energy', size: 'medium', theme: theme('dark') }, 'medium · буст на енергію', 'tile-m');
+  add(te, 'electros-tile', { device_id: 'dev_paused', size: 'medium', theme: theme('dark') }, 'medium · пауза, кінець невідомий', 'tile-m');
+
+  var stats = document.getElementById('stats');
+  add(stats, 'electros-card', { device_id: 'dev_idle', theme: theme('dark'), stats_period: 'day' }, 'S1 · статистика: День (погодинно) · dark', 'card-w');
+  add(stats, 'electros-card', { device_id: 'dev_idle', theme: theme('light'), stats_period: 'week' }, 'S2 · статистика: Тиждень (пн–нд) · light', 'card-w');
+  add(stats, 'electros-card', { device_id: 'dev_idle', theme: theme('dark'), stats_period: 'month' }, 'S3 · статистика: Місяць (по днях) · dark', 'card-w');
+  add(stats, 'electros-card', { device_id: 'dev_idle', theme: theme('light'), stats_period: 'year' }, 'S4 · статистика: Рік — місяці до встановлення «без розбивки» · light', 'card-w');
+  add(stats, 'electros-card', { device_id: 'dev_nostats', theme: theme('dark') }, 'S5 · статистики ще немає · dark', 'card-w');
 
   ['dark', 'light'].forEach(function (t) {
     var row = document.getElementById('tiles-' + t);
@@ -195,6 +238,10 @@
   }
   mock.onLog(function (e) {
     if (e.note) { logLine(e.note, 'note'); console.log('[mock]', e.note); return; }
+    if (e.ws) {
+      logLine('callWS ' + e.ws + ' ' + e.msg.period + ' ' + e.msg.start_time + ' → ' + e.msg.end_time + ' ' + JSON.stringify(e.msg.statistic_ids), 'ws');
+      return;
+    }
     logLine(e.domain + '.' + e.service + ' ' + JSON.stringify(e.data));
     console.log('[mock] callService', e.domain, e.service, e.data);
   });

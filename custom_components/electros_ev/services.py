@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import math
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
@@ -18,12 +19,16 @@ from .const import (
     ATTR_DEVICE_ID,
     ATTR_ENABLED,
     ATTR_END,
+    ATTR_KWH,
     ATTR_MINUTES,
     ATTR_START,
     DOMAIN,
+    SERVICE_CHARGE_ENERGY,
     SERVICE_CHARGE_FOR,
     SERVICE_EXTEND_CHARGE,
+    SERVICE_MAX_KWH,
     SERVICE_MAX_MINUTES,
+    SERVICE_MIN_KWH,
     SERVICE_SET_TIMER,
     SERVICE_STOP_CHARGING,
 )
@@ -74,7 +79,16 @@ def _hhmm(value: Any) -> str:
         raise vol.Invalid("expected a time as HH:MM") from err
 
 
+def _finite(value: float) -> float:
+    if not math.isfinite(value):
+        raise vol.Invalid("expected a finite number")
+    return value
+
+
 _MINUTES = vol.All(vol.Coerce(int), vol.Range(min=1, max=SERVICE_MAX_MINUTES))
+_KWH = vol.All(
+    vol.Coerce(float), _finite, vol.Range(min=SERVICE_MIN_KWH, max=SERVICE_MAX_KWH)
+)
 _AMPS = vol.All(vol.Coerce(int), vol.Range(min=protocol.MIN_AMPS, max=protocol.MAX_AMPS))
 
 CHARGE_FOR_SCHEMA = vol.Schema(
@@ -84,11 +98,23 @@ CHARGE_FOR_SCHEMA = vol.Schema(
         vol.Optional(ATTR_AMPS): _AMPS,
     }
 )
-EXTEND_CHARGE_SCHEMA = vol.Schema(
+CHARGE_ENERGY_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_DEVICE_ID): cv.string,
-        vol.Required(ATTR_MINUTES): _MINUTES,
+        vol.Required(ATTR_KWH): _KWH,
+        vol.Optional(ATTR_AMPS): _AMPS,
     }
+)
+EXTEND_CHARGE_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required(ATTR_DEVICE_ID): cv.string,
+            vol.Optional(ATTR_MINUTES): _MINUTES,
+            vol.Optional(ATTR_KWH): _KWH,
+        }
+    ),
+    cv.has_at_least_one_key(ATTR_MINUTES, ATTR_KWH),
+    cv.has_at_most_one_key(ATTR_MINUTES, ATTR_KWH),
 )
 STOP_CHARGING_SCHEMA = vol.Schema({vol.Required(ATTR_DEVICE_ID): cv.string})
 SET_TIMER_SCHEMA = vol.All(
@@ -144,9 +170,18 @@ def async_setup_services(hass: HomeAssistant) -> None:
             amps = protocol.normalize_amps(amps)
         await coordinator.async_charge_for(call.data[ATTR_MINUTES], amps)
 
+    async def _charge_energy(call: ServiceCall) -> None:
+        coordinator = _coordinator_for(hass, call.data[ATTR_DEVICE_ID])
+        amps = call.data.get(ATTR_AMPS)
+        if amps is not None:
+            amps = protocol.normalize_amps(amps)
+        await coordinator.async_charge_energy(call.data[ATTR_KWH], amps)
+
     async def _extend_charge(call: ServiceCall) -> None:
         coordinator = _coordinator_for(hass, call.data[ATTR_DEVICE_ID])
-        await coordinator.async_extend_charge(call.data[ATTR_MINUTES])
+        await coordinator.async_extend_charge(
+            minutes=call.data.get(ATTR_MINUTES), kwh=call.data.get(ATTR_KWH)
+        )
 
     async def _stop_charging(call: ServiceCall) -> None:
         coordinator = _coordinator_for(hass, call.data[ATTR_DEVICE_ID])
@@ -162,6 +197,9 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN, SERVICE_CHARGE_FOR, _charge_for, schema=_validated(CHARGE_FOR_SCHEMA)
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_CHARGE_ENERGY, _charge_energy, schema=_validated(CHARGE_ENERGY_SCHEMA)
     )
     hass.services.async_register(
         DOMAIN, SERVICE_EXTEND_CHARGE, _extend_charge, schema=_validated(EXTEND_CHARGE_SCHEMA)

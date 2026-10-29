@@ -1,9 +1,10 @@
 /*
- * ElectroS EV — Lovelace cards for the electros_ev integration.
+ * Струм (Strum) — Lovelace cards for the electros_ev integration (smart ElectroS charging).
  *
  * Classic script (no imports, no CDN). Served by the integration at /electros_ev/electros-card.js.
  * Defines:
- *   <electros-card>  full card (power ring, countdown, quick charge, amps, night tariff, energy)
+ *   <electros-card>  full card (power ring, countdown, quick charge by time or energy, amps, night tariff,
+ *                    energy statistics День · Тиждень · Місяць · Рік from HA long-term statistics)
  *   <electros-tile>  compact widget (size: small | medium)
  *   <electros-card-editor>, <electros-tile-editor>  visual editors built on <ha-form>
  *
@@ -15,7 +16,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2.0.0';
+  const VERSION = '2.1.0';
   const DOMAIN = 'electros_ev';
   const DOCS_URL = 'https://github.com/podzolkov/electros-ev-ha-from-andriy';
 
@@ -30,6 +31,15 @@
   ]);
   const DEFAULT_QUICK = [15, 30, 60, 120];
   const QUICK_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 360, 480];
+  const DEFAULT_QUICK_KWH = [5, 10, 20, 30];
+  const QUICK_KWH_OPTIONS = [2, 5, 10, 15, 20, 25, 30, 40, 50, 60, 80];
+  const KWH_MIN = 0.5; // electros_ev.charge_energy accepts 0.5..100 kWh
+  const KWH_MAX = 100;
+  const EXTEND_MIN = 15; // "+15 хв"
+  const EXTEND_KWH = 5; // "+5 кВт·год"
+  const PERIODS = ['day', 'week', 'month', 'year'];
+  const STAT_TTL = 60000; // the current period is re-read at most once a minute
+  const STAT_FINAL_AFTER = 70 * 60000; // a past period read this long after its end is final
   const RING_R = 116;
   const RING_C = 2 * Math.PI * RING_R; // 728.85
   const TILE_R = 38;
@@ -138,15 +148,49 @@
       ring_aria: '{v} {u}, {s}',
       energy_aria: 'Енергія останніх сесій',
       ed_device_id: 'Зарядка',
-      ed_price_per_kwh: 'Ціна за кВт·год (необовʼязково — показує вартість)',
       ed_theme: 'Тема',
       ed_quick_minutes: 'Швидкий вибір часу, хв',
+      ed_quick_kwh: 'Швидкий вибір енергії, кВт·год',
       ed_size: 'Розмір плитки',
       theme_auto: 'Авто (як у Home Assistant)',
       theme_light: 'Світла',
       theme_dark: 'Темна',
       size_small: 'Мала (квадрат)',
       size_medium: 'Середня (широка)',
+      seg_time: 'Час',
+      seg_energy: 'Енергія',
+      mode_aria: 'Як заряджати: за часом чи за енергією',
+      charge_kwh: 'Зарядити {k}',
+      slide_aria_kwh: 'Зарядити {k}: проведіть вправо або натисніть Enter',
+      approx: '≈ {v}',
+      of_target: '{a} з {b}',
+      eta_at: '≈ о {t}',
+      eta_unknown: 'час уточнюється',
+      plus_kwh_aria: 'Додати {k}',
+      bypass_energy: 'Заряджаємо поза розкладом. Нічний таймер повернеться сам після {k}.',
+      le_charging_blocked: 'Зарядка не почалась — її заблокував таймер',
+      le_deadline: 'Зупинено за запобіжним лімітом часу — ціль не досягнуто',
+      le_stop_failed: 'Не вдалося зупинити зарядку — повторимо, щойно зарядка відповість',
+      le_generic: 'Помилка: {e}',
+      p_day: 'День',
+      p_week: 'Тиждень',
+      p_month: 'Місяць',
+      p_year: 'Рік',
+      period_aria: 'Період статистики',
+      prev_aria: 'Попередній період',
+      next_aria: 'Наступний період',
+      today: 'Сьогодні',
+      yesterday: 'Вчора',
+      tariff_day: 'Дорога · день',
+      tariff_night: 'Дешева · ніч',
+      no_split: 'Без розбивки',
+      no_split_note: 'лічильник зарядки, без розбивки на тарифи',
+      total: 'Усього',
+      savings: 'Економія на нічному тарифі',
+      stat_empty: 'Статистика накопичується з моменту встановлення',
+      stat_empty_sub: 'Перші дані зʼявляться впродовж години.',
+      stat_error: 'Не вдалося завантажити статистику',
+      stat_aria: 'Енергія за період {p}: {v}. Стрілки вліво і вправо — по стовпчиках.',
     },
     ru: {
       st_waiting_for_vehicle: 'Жду авто',
@@ -246,15 +290,49 @@
       ring_aria: '{v} {u}, {s}',
       energy_aria: 'Энергия последних сессий',
       ed_device_id: 'Зарядка',
-      ed_price_per_kwh: 'Цена за кВт·ч (необязательно — показывает стоимость)',
       ed_theme: 'Тема',
       ed_quick_minutes: 'Быстрый выбор времени, мин',
+      ed_quick_kwh: 'Быстрый выбор энергии, кВт·ч',
       ed_size: 'Размер плитки',
       theme_auto: 'Авто (как в Home Assistant)',
       theme_light: 'Светлая',
       theme_dark: 'Тёмная',
       size_small: 'Маленькая (квадрат)',
       size_medium: 'Средняя (широкая)',
+      seg_time: 'Время',
+      seg_energy: 'Энергия',
+      mode_aria: 'Как заряжать: по времени или по энергии',
+      charge_kwh: 'Зарядить {k}',
+      slide_aria_kwh: 'Зарядить {k}: проведите вправо или нажмите Enter',
+      approx: '≈ {v}',
+      of_target: '{a} из {b}',
+      eta_at: '≈ в {t}',
+      eta_unknown: 'время уточняется',
+      plus_kwh_aria: 'Добавить {k}',
+      bypass_energy: 'Заряжаем вне расписания. Ночной таймер вернётся сам после {k}.',
+      le_charging_blocked: 'Зарядка не началась — её заблокировал таймер',
+      le_deadline: 'Остановлено по защитному лимиту времени — цель не достигнута',
+      le_stop_failed: 'Не удалось остановить зарядку — повторим, как только зарядка ответит',
+      le_generic: 'Ошибка: {e}',
+      p_day: 'День',
+      p_week: 'Неделя',
+      p_month: 'Месяц',
+      p_year: 'Год',
+      period_aria: 'Период статистики',
+      prev_aria: 'Предыдущий период',
+      next_aria: 'Следующий период',
+      today: 'Сегодня',
+      yesterday: 'Вчера',
+      tariff_day: 'Дорогой · день',
+      tariff_night: 'Дешёвый · ночь',
+      no_split: 'Без разбивки',
+      no_split_note: 'счётчик зарядки, без разбивки по тарифам',
+      total: 'Всего',
+      savings: 'Экономия на ночном тарифе',
+      stat_empty: 'Статистика накапливается с момента установки',
+      stat_empty_sub: 'Первые данные появятся в течение часа.',
+      stat_error: 'Не удалось загрузить статистику',
+      stat_aria: 'Энергия за период {p}: {v}. Стрелки влево и вправо — по столбцам.',
     },
     en: {
       st_waiting_for_vehicle: 'Waiting for car',
@@ -354,15 +432,49 @@
       ring_aria: '{v} {u}, {s}',
       energy_aria: 'Energy of recent sessions',
       ed_device_id: 'Charger',
-      ed_price_per_kwh: 'Price per kWh (optional — shows cost)',
       ed_theme: 'Theme',
       ed_quick_minutes: 'Quick durations, min',
+      ed_quick_kwh: 'Quick energy amounts, kWh',
       ed_size: 'Tile size',
       theme_auto: 'Auto (follow Home Assistant)',
       theme_light: 'Light',
       theme_dark: 'Dark',
       size_small: 'Small (square)',
       size_medium: 'Medium (wide)',
+      seg_time: 'Time',
+      seg_energy: 'Energy',
+      mode_aria: 'Charge by time or by energy',
+      charge_kwh: 'Charge {k}',
+      slide_aria_kwh: 'Charge {k}: slide right or press Enter',
+      approx: '≈ {v}',
+      of_target: '{a} of {b}',
+      eta_at: '≈ at {t}',
+      eta_unknown: 'estimating time',
+      plus_kwh_aria: 'Add {k}',
+      bypass_energy: 'Charging outside the schedule. The night timer comes back by itself after {k}.',
+      le_charging_blocked: 'Charging did not start — the timer blocked it',
+      le_deadline: 'Stopped by the safety time limit — target not reached',
+      le_stop_failed: 'Could not stop charging — retrying as soon as the charger responds',
+      le_generic: 'Error: {e}',
+      p_day: 'Day',
+      p_week: 'Week',
+      p_month: 'Month',
+      p_year: 'Year',
+      period_aria: 'Statistics period',
+      prev_aria: 'Previous period',
+      next_aria: 'Next period',
+      today: 'Today',
+      yesterday: 'Yesterday',
+      tariff_day: 'Peak · day',
+      tariff_night: 'Off-peak · night',
+      no_split: 'Not split',
+      no_split_note: 'charger counter, not split by rate',
+      total: 'Total',
+      savings: 'Saved with the night rate',
+      stat_empty: 'Statistics are collected from the moment of installation',
+      stat_empty_sub: 'First data appears within an hour.',
+      stat_error: "Couldn't load statistics",
+      stat_aria: 'Energy for {p}: {v}. Left and right arrows move between bars.',
     },
   };
 
@@ -435,6 +547,21 @@
     const n = typeof v === 'number' ? v : parseFloat(v);
     return Number.isFinite(n) ? n : d;
   };
+
+  /* "10" / "2,5" — whole kWh without decimals, otherwise one decimal. */
+  function fmtK(v, locale) {
+    const r = Math.round(Number(v) * 10) / 10;
+    return fmtNum(r, Number.isInteger(r) ? 0 : 1, locale);
+  }
+
+  function fmtKwh(lang, v, locale) {
+    return fmtK(v, locale) + ' ' + tr(lang, 'kwh');
+  }
+
+  /* Money with sensible precision: kopecks below 100, whole units above. */
+  function fmtCost(v, hass) {
+    return fmtMoney(v, hass, Math.abs(Number(v)) >= 100 ? 0 : 2);
+  }
 
   function parseHM(s) {
     if (typeof s !== 'string') return null;
@@ -533,6 +660,124 @@
   }
 
   const mod1440 = (v) => ((v % 1440) + 1440) % 1440;
+
+  /* ------------------------------------------------------------ statistics */
+
+  /* Offset of `tz` from UTC at `ms`, in ms. */
+  function tzOffset(ms, tz) {
+    const p = zoneParts(ms, tz);
+    return Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s) - Math.floor(ms / 1000) * 1000;
+  }
+
+  /* Wall clock (y, mo 1-based, d, h) in `tz` -> epoch ms. Day/month overflow is normalised by Date.UTC. */
+  function zonedMs(y, mo, d, h, tz) {
+    const guess = Date.UTC(y, mo - 1, d, h || 0, 0, 0);
+    const first = guess - tzOffset(guess, tz);
+    return guess - tzOffset(first, tz);
+  }
+
+  const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  /* Buckets of one statistics view in the HA time zone. offset 0 = the period containing `now`.
+     День = hourly (23/24/25 on DST days), Тиждень = Mon..Sun, Місяць = days, Рік = 12 months. */
+  function statRange(period, offset, now, tz) {
+    const p = zoneParts(now, tz);
+    const b = [];
+    let stat;
+    if (period === 'day') {
+      stat = 'hour';
+      const s = zonedMs(p.y, p.mo, p.d + offset, 0, tz);
+      const e = zonedMs(p.y, p.mo, p.d + offset + 1, 0, tz);
+      for (let t = s; t < e; t += 3600000) b.push({ start: t, end: Math.min(e, t + 3600000) });
+    } else if (period === 'year') {
+      stat = 'month';
+      const y = p.y + offset;
+      for (let i = 0; i < 12; i += 1) {
+        b.push({ start: zonedMs(y, i + 1, 1, 0, tz), end: zonedMs(y, i + 2, 1, 0, tz), year: y, month: i + 1 });
+      }
+    } else {
+      stat = 'day';
+      let mo = p.mo;
+      let d;
+      let n;
+      if (period === 'week') {
+        d = p.d - Math.max(0, WEEKDAYS.indexOf(p.wd)) + 7 * offset;
+        n = 7;
+      } else {
+        mo = p.mo + offset;
+        d = 1;
+        n = new Date(Date.UTC(p.y, mo, 0)).getUTCDate();
+      }
+      for (let i = 0; i < n; i += 1) b.push({ start: zonedMs(p.y, mo, d + i, 0, tz), end: zonedMs(p.y, mo, d + i + 1, 0, tz) });
+    }
+    return { period, offset, stat, start: b[0].start, end: b[b.length - 1].end, buckets: b, nowYear: p.y };
+  }
+
+  function statTime(v) {
+    const n = typeof v === 'number' ? v : Date.parse(v);
+    if (!Number.isFinite(n)) return NaN;
+    return n < 1e11 ? n * 1000 : n; // very old HA sent seconds
+  }
+
+  /* Nearest bucket start: rows are stamped at bucket starts; half a bucket of slack absorbs DST/tz quirks. */
+  function bucketIndex(b, t) {
+    for (let i = 0; i < b.length; i += 1) {
+      const half = (b[i].end - b[i].start) / 2;
+      if (t >= b[i].start - half && t < b[i].end - half) return i;
+    }
+    return -1;
+  }
+
+  /* recorder/statistics_during_period result -> per-bucket {day, night, cost}. */
+  function mergeStats(rg, ids, res) {
+    const out = rg.buckets.map(() => ({ day: 0, night: 0, cost: 0, has: false, hasCost: false }));
+    const add = (id, field) => {
+      const rows = res && typeof res === 'object' && Array.isArray(res[id]) ? res[id] : [];
+      for (const row of rows) {
+        if (!row || typeof row !== 'object') continue;
+        const t = statTime(row.start);
+        const v = Number(row.change);
+        if (!Number.isFinite(t) || row.change === null || !Number.isFinite(v)) continue;
+        const i = bucketIndex(rg.buckets, t);
+        if (i < 0) continue;
+        out[i][field] += Math.max(0, v);
+        if (field === 'cost') out[i].hasCost = true;
+        else out[i].has = true;
+      }
+    };
+    add(ids[0], 'day');
+    add(ids[1], 'night');
+    if (ids[2]) add(ids[2], 'cost');
+    return out;
+  }
+
+  /* Round an axis maximum up to 1/2/3/4/5/6/8 x 10^n so the half-way gridline is a clean number too. */
+  function niceCeil(v) {
+    if (!(v > 0)) return 1;
+    const e = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const f of [1, 2, 3, 4, 5, 6, 8, 10]) if (f * e >= v - 1e-9) return f * e;
+    return 10 * e;
+  }
+
+  function dtf(lang, tz, opts) {
+    try {
+      return new Intl.DateTimeFormat(lang, Object.assign({ timeZone: tz }, opts));
+    } catch (e) {
+      return new Intl.DateTimeFormat(undefined, opts);
+    }
+  }
+
+  /* sensor.boost_end.last_error: known codes are translated, free text is shown as is. */
+  function lastErrorText(lang, code) {
+    const c = String(code);
+    if (/^[a-z0-9_]+$/.test(c)) {
+      if (/deadline|timeout|time_limit/.test(c)) return tr(lang, 'le_deadline');
+      if (c === 'charging_blocked') return tr(lang, 'le_charging_blocked');
+      if (c === 'stop_failed') return tr(lang, 'le_stop_failed');
+      return tr(lang, 'le_generic', { e: c });
+    }
+    return c;
+  }
 
   /* --------------------------------------------------------- entity lookup */
 
@@ -635,11 +880,17 @@
     m.history = Array.isArray(sA.history)
       ? sA.history.filter((x) => x && typeof x === 'object').slice(0, 50)
       : [];
+    m.sessionCost = finite(sA.cost, null);
     m.hasMonth = !!S('sensor.month_energy');
     m.month = N('sensor.month_energy');
     const mA = A('sensor.month_energy');
     m.months = Array.isArray(mA.months) ? mA.months : null;
     m.curMonth = finite(mA.current_month, null);
+
+    // two-zone tariff (backend-owned prices; the card never computes them itself)
+    m.priceDay = N('number.price_day');
+    m.priceNight = N('number.price_night');
+    m.priceNow = N('sensor.current_price');
 
     // boost
     const bS = S('sensor.boost_end');
@@ -647,12 +898,24 @@
     const endMs = bS ? Date.parse(bS.state) : NaN;
     m.boostEnd = Number.isFinite(endMs) ? endMs : null;
     m.boostMinutes = finite(bA.minutes, 0);
-    m.boostUnlimited = bA.unlimited === true && bA.active !== false;
+    m.boostMode = typeof bA.mode === 'string' ? bA.mode : null;
+    // energy boost: boost_end state is the ESTIMATED end (unknown while power is 0)
+    m.boostEnergy = m.boostMode === 'energy' && bA.active !== false;
+    m.targetKwh = finite(bA.target_kwh, null);
+    m.deliveredKwh = Math.max(0, finite(bA.delivered_kwh, 0));
+    const dl = typeof bA.deadline === 'string' ? Date.parse(bA.deadline) : NaN;
+    m.deadline = Number.isFinite(dl) ? dl : null;
+    m.etaMs = m.boostEnergy ? m.boostEnd : null;
+    m.lastError = typeof bA.last_error === 'string' && bA.last_error.trim() ? bA.last_error.trim() : null;
+    m.boostUnlimited = !m.boostEnergy && (bA.unlimited === true || m.boostMode === 'unlimited') && bA.active !== false;
     // active === true keeps the countdown at 0:00 until the backend actually stops (no flicker to "no limit")
-    m.boostTimed = !m.boostUnlimited && m.boostEnd !== null && bA.active !== false
+    m.boostTimed = !m.boostEnergy && !m.boostUnlimited && m.boostEnd !== null && bA.active !== false
       && (bA.active === true || m.boostEnd > now - 1000);
-    m.boostActive = m.boostTimed || m.boostUnlimited;
+    m.boostActive = m.boostTimed || m.boostUnlimited || m.boostEnergy;
     m.boostSetting = N('number.boost_minutes');
+    m.boostKwhSetting = N('number.boost_kwh');
+    // the backend supports electros_ev.charge_energy when it exposes its entities
+    m.hasEnergy = !!(map['number.boost_kwh'] || map['button.boost_energy']) || m.boostEnergy;
 
     // switches
     m.hasChargeSw = !!S('switch.charging');
@@ -684,8 +947,12 @@
     m.minsToStart = m.waitingNight ? Math.ceil(mod1440(m.tStart - m.nowMin)) : 0;
     m.minsToEnd = m.inWin ? Math.ceil(mod1440(m.tEnd - m.nowMin)) : 0;
     m.winLen = mod1440(m.tEnd - m.tStart) || 1440;
+    m.remainingKwh = m.targetKwh !== null ? Math.max(0, m.targetKwh - m.deliveredKwh) : null;
     if (m.charging) {
-      if (m.boostTimed) {
+      if (m.boostEnergy) {
+        m.mode = 'energy';
+        m.frac = m.targetKwh > 0 ? clamp(m.deliveredKwh / m.targetKwh, 0, 1) : 0;
+      } else if (m.boostTimed) {
         m.mode = 'timed';
         m.remaining = Math.max(0, (m.boostEnd - m.now) / 1000);
         const total = m.boostMinutes > 0 ? m.boostMinutes * 60 : Math.max(m.remaining, 1);
@@ -722,6 +989,17 @@
     return { kind: 'neutral', icon: null, text: tr(lang, 'st_' + s) };
   }
 
+  function normalizeKwhList(raw) {
+    let q = raw;
+    if (typeof q === 'string') q = q.split(/[,;\s]+/);
+    if (!Array.isArray(q)) return DEFAULT_QUICK_KWH.slice();
+    q = Array.from(new Set(q.map((x) => (x === null || x === '' ? NaN : Math.round(Number(x) * 10) / 10))
+      .filter((x) => Number.isFinite(x) && x >= KWH_MIN && x <= KWH_MAX)))
+      .sort((a, b) => a - b)
+      .slice(0, 5);
+    return q.length ? q : DEFAULT_QUICK_KWH.slice();
+  }
+
   function normalizeConfig(c, tile) {
     const src = c && typeof c === 'object' ? c : {};
     const out = Object.assign({}, src);
@@ -733,10 +1011,13 @@
       .slice(0, 5);
     if (!q.length) q = DEFAULT_QUICK.slice();
     out.quick_minutes = q;
+    out.quick_kwh = normalizeKwhList(src.quick_kwh);
     out.theme = ['light', 'dark', 'auto'].includes(src.theme) ? src.theme : 'auto';
-    const raw = src.price_per_kwh;
-    const price = Number(raw);
-    out.price_per_kwh = raw !== undefined && raw !== null && raw !== '' && Number.isFinite(price) && price >= 0 ? price : null;
+    // price_per_kwh (v2.0 card option) is ignored: cost now comes from the backend tariff sensors
+    delete out.price_per_kwh;
+    // YAML-only: initial statistics period and charge mode
+    out.stats_period = PERIODS.includes(src.stats_period) ? src.stats_period : 'week';
+    out.charge_mode = src.charge_mode === 'energy' ? 'energy' : 'time';
     out.device_id = typeof src.device_id === 'string' && src.device_id ? src.device_id : null;
     if (tile) out.size = src.size === 'small' ? 'small' : 'medium';
     return out;
@@ -758,6 +1039,9 @@
     play: '<path d="M8 5v14l11-7z"/>',
     restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>',
     chev: '<path d="m9 6 6 6-6 6"/>',
+    chevl: '<path d="m15 6-6 6 6 6"/>',
+    battery: '<rect x="2.5" y="7" width="16.5" height="10" rx="2.5"/><path d="M21.5 10.5v3M10.8 9.2l-2.3 3.3h3.3l-2.3 3.3"/>',
+    chart: '<path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/>',
     gear: '<path d="M10.3 4.3c.4-1.7 3-1.7 3.4 0a1.7 1.7 0 0 0 2.6 1.1c1.5-.9 3.3.8 2.4 2.4a1.7 1.7 0 0 0 1 2.5c1.8.4 1.8 3 0 3.4a1.7 1.7 0 0 0-1 2.6c.9 1.5-.9 3.3-2.4 2.4a1.7 1.7 0 0 0-2.6 1c-.4 1.8-3 1.8-3.4 0a1.7 1.7 0 0 0-2.5-1c-1.6.9-3.3-.9-2.4-2.4a1.7 1.7 0 0 0-1.1-2.6c-1.7-.4-1.7-3 0-3.4a1.7 1.7 0 0 0 1.1-2.5c-.9-1.6.8-3.3 2.4-2.4a1.7 1.7 0 0 0 2.5-1.1z"/><circle cx="12" cy="12" r="3"/>',
   };
 
@@ -881,7 +1165,9 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
   --bar:rgba(255,255,255,.14);--sep:rgba(84,84,88,.55);
   --slide:rgba(48,209,88,.14);--slide-fill:rgba(48,209,88,.24);--slide-knob:#30D158;--slide-knob-fg:#04210E;--slide-fg:#4CE07A;
   --glow-on:rgba(48,209,88,.33);--glow-idle:rgba(120,120,128,.22);--glow-night:rgba(94,92,230,.30);--glow-fault:rgba(255,69,58,.26);--glow-off:rgba(120,120,128,.14);
-  --focus:#64D2FF;--thumb-b:transparent;--muted-ic:rgba(235,235,245,.45);--tile-base:#141619;--input:rgba(255,255,255,.08)}
+  --focus:#64D2FF;--thumb-b:transparent;--muted-ic:rgba(235,235,245,.45);--tile-base:#141619;--input:rgba(255,255,255,.08);
+  --c-day:#D97706;--c-night:#5E5CE6;--c-fb:rgba(235,235,245,.30);--c-fb2:rgba(235,235,245,.12);--grid:rgba(255,255,255,.09);
+  --segc:rgba(118,118,128,.24);--segc-on:rgba(255,255,255,.17);--segc-sh:inset 0 .5px 0 rgba(255,255,255,.22),0 2px 8px rgba(0,0,0,.28)}
 .light{color-scheme:light;
   --bg:#F2F2F7;--fg:#1C1C1E;--fg2:rgba(60,60,67,.6);--fg3:rgba(60,60,67,.45);
   --glass:rgba(255,255,255,.78);--glass-b:rgba(0,0,0,.05);
@@ -902,7 +1188,9 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
   --bar:rgba(118,118,128,.16);--sep:rgba(60,60,67,.18);
   --slide:rgba(52,199,89,.12);--slide-fill:rgba(52,199,89,.22);--slide-knob:#34C759;--slide-knob-fg:#FFFFFF;--slide-fg:#248A3D;
   --glow-on:rgba(52,199,89,.20);--glow-idle:rgba(88,86,214,.10);--glow-night:rgba(88,86,214,.16);--glow-fault:rgba(255,59,48,.14);--glow-off:rgba(142,142,147,.14);
-  --focus:#007AFF;--thumb-b:rgba(0,0,0,.08);--muted-ic:rgba(60,60,67,.45);--tile-base:#FCFCFE;--input:rgba(118,118,128,.12)}
+  --focus:#007AFF;--thumb-b:rgba(0,0,0,.08);--muted-ic:rgba(60,60,67,.45);--tile-base:#FCFCFE;--input:rgba(118,118,128,.12);
+  --c-day:#D97706;--c-night:#5856D6;--c-fb:rgba(60,60,67,.30);--c-fb2:rgba(60,60,67,.10);--grid:rgba(60,60,67,.12);
+  --segc:rgba(118,118,128,.12);--segc-on:#FFFFFF;--segc-sh:0 2px 6px rgba(0,0,0,.10),0 0 0 .5px rgba(0,0,0,.04)}
 .ic{display:inline-flex;align-items:center;justify-content:center;flex:none}
 .ic.green{color:var(--green-dot)}.ic.purple{color:var(--purple)}.ic.red{color:var(--red)}
 .ic.muted{color:var(--muted-ic)}.ic.blue{color:var(--blue)}.ic.grey{color:#8E8E93}
@@ -1053,6 +1341,54 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .bars-lbl{display:flex;gap:10px}
 .bars-lbl span{flex:1 1 0;min-width:0;text-align:center;font-size:11px;color:var(--fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bars-empty{font-size:13px;color:var(--fg2);padding:8px 0}
+.sess{display:flex;flex-direction:column;gap:14px}
+.segc{display:flex;gap:2px;padding:2px;border-radius:18px;background:var(--segc)}
+.segc button{flex:1 1 0;min-width:0;height:32px;border:0;border-radius:16px;background:transparent;color:var(--fg2);font-size:13px;font-weight:600;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 6px;white-space:nowrap;transition:background .2s,box-shadow .2s,color .2s}
+.segc button[aria-pressed="true"]{background:var(--segc-on);box-shadow:var(--segc-sh);color:var(--fg)}
+.segc button>span:last-child{overflow:hidden;text-overflow:ellipsis}
+.chip .cu{font-size:12px;font-weight:500;opacity:.72;margin-left:3px}
+.count .big{display:flex;align-items:baseline;gap:5px;min-width:0;white-space:nowrap;overflow:hidden}
+.count .big .bu{font-size:15px;font-weight:500;letter-spacing:0;color:var(--fg2)}
+.berr{display:flex;align-items:flex-start;gap:8px;margin-top:-4px;padding:0 18px;color:var(--red);font-size:13px;line-height:18px}
+.berr .ic{margin-top:1px}
+.st{display:flex;flex-direction:column;gap:12px}
+.snav{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.snav .pt{flex:1;min-width:0;text-align:center;font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.navb{position:relative;flex:none;width:32px;height:32px;border-radius:16px;border:0;background:var(--chip);color:var(--fg);display:flex;align-items:center;justify-content:center;padding:0}
+.navb::after{content:"";position:absolute;inset:-6px}
+.chart{position:relative;display:flex;flex-direction:column;gap:6px;border-radius:10px;transition:opacity .2s}
+.chart.stale{opacity:.45}
+.sread{height:18px;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg3);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.sread b{font-size:13px;font-weight:600;color:var(--fg)}
+.sread .lab{color:var(--fg2);overflow:hidden;text-overflow:ellipsis}
+.sread .k{display:inline-block;flex:none;width:10px;height:3px;border-radius:2px}
+.k.d,.sg.d,.sw2.d{background:var(--c-day)}.k.n,.sg.n,.sw2.n{background:var(--c-night)}.k.f{background:var(--c-fb)}
+.plotw{position:relative;height:120px;padding-right:30px}
+.sgrid{position:absolute;inset:0;pointer-events:none}
+.gl{position:absolute;left:0;right:30px;height:1px;background:var(--grid)}
+.yl{position:absolute;right:0;width:27px;text-align:right;font-size:10px;line-height:12px;color:var(--fg3);font-variant-numeric:tabular-nums;transform:translateY(50%)}
+.plot{position:relative;height:100%;display:flex;align-items:flex-end;cursor:pointer;touch-action:pan-y}
+.col{flex:1 1 0;min-width:0;height:100%;display:flex;align-items:flex-end;justify-content:center;transition:opacity .15s}
+.plot.hs .col:not(.on){opacity:.4}
+.stk{width:68%;max-width:24px;display:flex;flex-direction:column-reverse;gap:2px;border-radius:4px 4px 0 0;overflow:hidden}
+.sg{flex:none;width:100%}
+.sg.f,.sw2.f{background:repeating-linear-gradient(135deg,var(--c-fb) 0 3px,var(--c-fb2) 3px 6px)}
+.xl{display:flex;height:14px;padding-right:30px}
+.xl span{flex:1 1 0;min-width:0;display:flex;justify-content:center;font-size:11px;line-height:14px;color:var(--fg3);white-space:nowrap;font-variant-numeric:tabular-nums}
+.xl span.cur{color:var(--fg);font-weight:600}
+.sempty{min-height:158px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;padding:16px;
+  border-radius:18px;background:var(--tile);border:1px solid var(--tile-b)}
+.sempty .ic{width:36px;height:36px;border-radius:12px;background:var(--purple-bg);color:var(--purple);margin-bottom:2px}
+.sempty b{font-size:15px;line-height:20px;font-weight:600;max-width:270px}
+.sempty .t{font-size:13px;color:var(--fg2)}
+.legend{display:flex;flex-wrap:wrap;gap:8px 16px}
+.lg{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--fg2);white-space:nowrap}
+.lg .sw2{flex:none;width:10px;height:10px;border-radius:3px}
+.lg b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
+.tot{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.save{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-radius:16px;background:var(--green-bg);color:var(--green);font-size:13px;line-height:17px;font-weight:600}
+.save b{font-size:17px;font-variant-numeric:tabular-nums;white-space:nowrap}
 `;
 
   const CARD_HTML = (uid) => `
@@ -1091,9 +1427,10 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
     </div>
     <div class="glass count" data-r="count" hidden>
       <span class="ic blue" data-r="countIcon"></span>
-      <div class="txt"><span class="big" data-r="countBig"></span><span class="small" data-r="countSub"></span></div>
+      <div class="txt"><span class="big"><span data-r="countBig"></span><span class="bu" data-r="countUnit" hidden></span></span><span class="small" data-r="countSub"></span></div>
       <button class="plus" data-r="plus" type="button"></button>
     </div>
+    <div class="berr" data-r="boostErr" role="alert" hidden><span class="ic">${svgIcon('warn', 16, 2)}</span><span data-r="boostErrText"></span></div>
     <div class="glass hint" data-r="hint" hidden>
       <span class="ic">${svgIcon('bolt', 18, 2)}</span>
       <div class="txt"><b data-r="hintTitle"></b><span class="t" data-r="hintText"></span></div>
@@ -1105,6 +1442,10 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
     </div>
     <section class="glass panel" data-r="chargePanel">
       <div class="ph"><h2 data-r="chargeTitle"></h2><span class="s" data-r="chargeSub"></span></div>
+      <div class="segc" data-r="modeSeg" role="group" hidden>
+        <button type="button" data-r="segTime"><span class="ic">${svgIcon('timer', 15, 2)}</span><span data-r="segTimeT"></span></button>
+        <button type="button" data-r="segEnergy"><span class="ic">${svgIcon('bolt', 15, 2)}</span><span data-r="segEnergyT"></span></button>
+      </div>
       <div class="chips" data-r="chips" role="group"></div>
       <button class="main" data-r="mainBtn" type="button"><span class="ic" data-r="mainIcon"></span><span data-r="mainLabel"></span></button>
       <div class="slide" data-r="slide" hidden>
@@ -1147,9 +1488,31 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
     </section>
     <section class="glass panel" data-r="energyPanel" hidden>
       <div class="ph"><h2 data-r="energyTitle"></h2><span class="s" data-r="energySub"></span></div>
-      <div class="bars" data-r="bars" role="img"></div>
-      <div class="bars-lbl" data-r="barsLbl" aria-hidden="true"></div>
-      <div class="bars-empty" data-r="barsEmpty" hidden></div>
+      <div class="st" data-r="statBox" hidden>
+        <div class="segc" data-r="perSeg" role="group"></div>
+        <div class="snav">
+          <button class="navb" data-r="perPrev" type="button">${svgIcon('chevl', 18, 2.2)}</button>
+          <span class="pt num" data-r="perTitle" aria-live="polite"></span>
+          <button class="navb" data-r="perNext" type="button">${svgIcon('chev', 18, 2.2)}</button>
+        </div>
+        <div class="chart" data-r="chart" tabindex="0" role="group">
+          <div class="sread" data-r="statRead" aria-live="polite"></div>
+          <div class="plotw"><div class="sgrid" data-r="sgrid" aria-hidden="true"></div><div class="plot" data-r="plot" aria-hidden="true"></div></div>
+          <div class="xl" data-r="xl" aria-hidden="true"></div>
+        </div>
+        <div class="sempty" data-r="statEmpty" hidden><span class="ic">${svgIcon('chart', 20, 2)}</span><b data-r="statEmptyT"></b><span class="t" data-r="statEmptyS"></span></div>
+        <div class="legend" data-r="legend"></div>
+        <div class="tot" data-r="tot">
+          <div class="stat"><span class="l" data-r="totL1"></span><span class="v"><span data-r="totV1"></span><span class="u" data-r="totU1"></span></span></div>
+          <div class="stat"><span class="l" data-r="totL2"></span><span class="v"><span data-r="totV2"></span></span></div>
+        </div>
+        <div class="save" data-r="save" hidden><span data-r="saveL"></span><b data-r="saveV"></b></div>
+      </div>
+      <div class="sess" data-r="sessBox">
+        <div class="bars" data-r="bars" role="img"></div>
+        <div class="bars-lbl" data-r="barsLbl" aria-hidden="true"></div>
+        <div class="bars-empty" data-r="barsEmpty" hidden></div>
+      </div>
     </section>
   </div>
 </ha-card>`;
@@ -1332,14 +1695,60 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
       return b.kind;
     }
 
+    /* A chip tapped a moment ago wins; otherwise a running boost is mirrored by the chips. */
+    _freshTap(kind) {
+      return this._tap && this._tap.kind === kind && Date.now() - this._tap.at < 8000;
+    }
+
     _selection(m) {
       const q = this._config.quick_minutes;
-      if (this._sel !== undefined && (this._sel === 0 || q.includes(this._sel))) return this._sel;
-      if (m.charging && m.mode === 'timed' && q.includes(m.boostMinutes)) return m.boostMinutes;
-      if (m.charging && m.mode === 'unlimited') return 0;
+      const own = this._sel !== undefined && (this._sel === 0 || q.includes(this._sel));
+      if (m.charging && m.boostActive && !(own && this._freshTap('time'))) {
+        if (m.mode === 'timed') return q.includes(m.boostMinutes) ? m.boostMinutes : null;
+        if (m.mode === 'unlimited') return 0;
+        if (m.mode === 'energy') return null;
+      }
+      if (own) return this._sel;
       if (m.boostSetting !== null && q.includes(m.boostSetting)) return m.boostSetting;
       if (q.includes(30)) return 30;
       return q[0];
+    }
+
+    _selectionKwh(m) {
+      const q = this._config.quick_kwh;
+      const own = this._selKwh !== undefined && q.includes(this._selKwh);
+      if (m.charging && m.boostActive && !(own && this._freshTap('energy'))) {
+        return m.mode === 'energy' && q.includes(m.targetKwh) ? m.targetKwh : null;
+      }
+      if (own) return this._selKwh;
+      if (m.boostKwhSetting !== null && q.includes(m.boostKwhSetting)) return m.boostKwhSetting;
+      if (q.includes(10)) return 10;
+      return q[0];
+    }
+
+    /* "Час | Енергія": the user's choice, else the running boost, else the configured default. */
+    _chargeMode(m) {
+      if (!m.hasEnergy) return 'time';
+      if (this._cmode) return this._cmode;
+      if (m.charging && m.mode === 'energy') return 'energy';
+      if (m.charging && (m.mode === 'timed' || m.mode === 'unlimited')) return 'time';
+      return this._config.charge_mode || 'time';
+    }
+
+    /* Start with whatever the charge panel currently offers (time chip or energy chip). */
+    _startSelected(m) {
+      if (this._chargeMode(m) === 'energy') {
+        const k = this._selectionKwh(m);
+        if (k > 0) return this._startEnergy(k);
+        return Promise.resolve();
+      }
+      return this._startCharge(this._selection(m));
+    }
+
+    _canStartSelected(m) {
+      if (this._chargeMode(m) === 'energy') return this._selectionKwh(m) > 0;
+      const sel = this._selection(m);
+      return sel > 0 || (sel === 0 && !!this._map['switch.charging']);
     }
 
     _call(domain, service, data) {
@@ -1390,6 +1799,37 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
     _extend(minutes) {
       return this._call(DOMAIN, 'extend_charge', { device_id: this._deviceId(), minutes });
     }
+
+    _startEnergy(kwh) {
+      return this._call(DOMAIN, 'charge_energy', { device_id: this._deviceId(), kwh });
+    }
+
+    _extendKwh(kwh) {
+      return this._call(DOMAIN, 'extend_charge', { device_id: this._deviceId(), kwh });
+    }
+
+    /* "4,2 з 10 кВт·год" */
+    _ofTarget(m, lang, loc) {
+      return tr(lang, 'of_target', { a: fmtNum(m.deliveredKwh, 1, loc), b: m.targetKwh !== null ? fmtK(m.targetKwh, loc) : '—' })
+        + ' ' + tr(lang, 'kwh');
+    }
+
+    /* "+15 хв" for a timed boost, "+5 кВт·год" for an energy boost. */
+    _plus() {
+      const m = this._m;
+      if (!m || m.offline) return;
+      if (m.mode === 'energy') this._extendKwh(EXTEND_KWH);
+      else this._extend(EXTEND_MIN);
+    }
+
+    _plusLabel(m, lang) {
+      const loc = numLocale(this._hass);
+      if (m.mode === 'energy') {
+        const k = fmtKwh(lang, EXTEND_KWH, loc);
+        return { text: '+' + k, aria: tr(lang, 'plus_kwh_aria', { k }) };
+      }
+      return { text: tr(lang, 'plus15'), aria: tr(lang, 'plus15_aria') };
+    }
   }
 
   /* ------------------------------------------------------------- full card */
@@ -1419,9 +1859,10 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
       const r = (this._r = collectRefs(this.shadowRoot));
       r.settings.addEventListener('click', () => this._moreInfo());
       r.mainBtn.addEventListener('click', () => this._onMain());
-      r.plus.addEventListener('click', () => {
-        if (this._m && !this._m.offline) this._extend(15);
-      });
+      r.plus.addEventListener('click', () => this._plus());
+      r.segTime.addEventListener('click', () => this._setMode('time'));
+      r.segEnergy.addEventListener('click', () => this._setMode('energy'));
+      this._bindStats();
       r.nightSw.addEventListener('click', () => this._toggleSwitch('night', 'switch.night_timer'));
       r.wkSw.addEventListener('click', () => this._toggleSwitch('weekend', 'switch.weekend_free'));
       r.nightLine.addEventListener('click', () => {
@@ -1463,20 +1904,37 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
         this._setBusy('stop');
         this._stopCharge();
       } else {
+        if (!this._canStartSelected(m)) return;
         this._setBusy('start');
-        this._startCharge(this._selection(m));
+        this._startSelected(m);
       }
       this._update();
     }
 
-    _onChip(minutes) {
+    _setMode(mode) {
+      this._cmode = mode;
+      this._update();
+    }
+
+    _onChip(kind, val) {
       const m = this._m;
+      this._tap = { kind, at: Date.now() };
+      if (kind === 'energy') {
+        this._selKwh = val;
+        // While charging an energy chip re-targets the session: N kWh from now.
+        if (m && m.charging && !m.offline
+          && !(m.mode === 'energy' && m.targetKwh === val && m.deliveredKwh < 0.05)) this._startEnergy(val);
+        this._update();
+        return;
+      }
+      const minutes = val;
       this._sel = minutes;
       // While charging a chip re-times the session (as in the approved mock-up).
       if (m && m.charging && !m.offline) {
         if (minutes > 0) {
           if (!(m.mode === 'timed' && m.boostMinutes === minutes && m.remaining > minutes * 60 - 5)) this._startCharge(minutes);
         } else if (m.mode !== 'unlimited') {
+          // ∞ while a timed/energy boost runs: the backend turns it into an unlimited bypass
           this._startCharge(0);
         }
       }
@@ -1618,12 +2076,12 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 
     _slideDone() {
       const m = this._m;
-      if (!m || m.offline || this._busy || m.charging) {
+      if (!m || m.offline || this._busy || m.charging || !this._canStartSelected(m)) {
         if (this._resetSlide) this._resetSlide();
         return;
       }
       this._setBusy('start');
-      this._startCharge(this._selection(m));
+      this._startSelected(m);
       this._update();
     }
 
@@ -1786,7 +2244,14 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
         let cIcon = 'timer';
         let cCls = 'blue';
         let plus = true;
-        if (m.mode === 'timed') {
+        let bigUnit = '';
+        if (m.mode === 'energy') {
+          // "4,2 з 10 кВт·год" + "≈ о 22:05" (estimated end from sensor.boost_end; unknown while power is 0)
+          big = tr(lang, 'of_target', { a: fmtNum(m.deliveredKwh, 1, loc), b: m.targetKwh !== null ? fmtK(m.targetKwh, loc) : '—' });
+          bigUnit = tr(lang, 'kwh');
+          small = m.etaMs !== null ? tr(lang, 'eta_at', { t: clockOf(m.etaMs, m.tz) }) : tr(lang, 'eta_unknown');
+          cIcon = 'battery';
+        } else if (m.mode === 'timed') {
           big = fmtCountdown(m.remaining);
           small = tr(lang, 'until_stop_at', { t: clockOf(m.boostEnd, m.tz) });
         } else if (m.mode === 'unlimited') {
@@ -1808,12 +2273,19 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
         setClass(r.countIcon, 'ic ' + cCls);
         setIcon(r.countIcon, cIcon, 26, 1.8);
         setText(r.countBig, big);
+        setText(r.countUnit, bigUnit);
+        show(r.countUnit, !!bigUnit);
         setText(r.countSub, small);
         show(r.plus, plus);
-        setText(r.plus, tr(lang, 'plus15'));
-        setAttr(r.plus, 'aria-label', tr(lang, 'plus15_aria'));
+        const pl = this._plusLabel(m, lang);
+        setText(r.plus, pl.text);
+        setAttr(r.plus, 'aria-label', pl.aria);
         setDisabled(r.plus, dis);
       }
+
+      // last boost problem from the backend (e.g. the energy boost hit its safety deadline)
+      show(r.boostErr, !!m.lastError);
+      if (m.lastError) setText(r.boostErrText, lastErrorText(lang, m.lastError));
 
       // "need it now?" hint
       const hint = m.bypass && m.status !== 'waiting_for_vehicle';
@@ -1832,9 +2304,10 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
         setText(r.s2l, tr(lang, 'duration'));
         setText(r.s2v, Number.isFinite(m.startedAt) ? fmtElapsed((m.now - m.startedAt) / 1000) : '—');
         setText(r.s2u, '');
-        if (cfg.price_per_kwh !== null) {
+        if (m.sessionCost !== null) {
+          // sensor.session_energy.cost — the backend prices each kWh by the tariff zone it was charged in
           setText(r.s3l, tr(lang, 'cost'));
-          setText(r.s3v, fmtMoney((m.session || 0) * cfg.price_per_kwh, h, 2));
+          setText(r.s3v, fmtMoney(m.sessionCost, h, 2));
           setText(r.s3u, '');
         } else {
           setText(r.s3l, tr(lang, 'voltage'));
@@ -1851,27 +2324,67 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 
     _renderCharge(m, lang, busy, dis) {
       const r = this._r;
-      const q = this._config.quick_minutes;
-      const sel = this._selection(m);
+      const h = this._hass;
+      const loc = numLocale(h);
       const canStart = !!(this._map['sensor.status'] || this._map['switch.charging']);
       show(r.chargePanel, canStart);
       if (!canStart) return;
+      const mode = this._chargeMode(m);
+      const energy = mode === 'energy';
+      const q = energy ? this._config.quick_kwh : this._config.quick_minutes;
+      const sel = energy ? this._selectionKwh(m) : this._selection(m);
       setText(r.chargeTitle, tr(lang, 'charge_for'));
-      setText(r.chargeSub, m.charging ? tr(lang, 'then_off')
-        : sel > 0 ? tr(lang, 'until_t', { t: clockOf(m.now + sel * 60000, m.tz) }) : tr(lang, 'until_manual'));
+      let sub;
+      if (m.charging) {
+        sub = tr(lang, 'then_off');
+      } else if (energy) {
+        // rough preview at the configured current: "≈ 1 год 25 хв · ≈ 43 ₴"
+        const parts = [];
+        const kw = ((m.amps || 0) * (m.voltage || 230)) / 1000;
+        if (sel > 0 && kw > 0) parts.push(tr(lang, 'approx', { v: fmtDur(lang, (sel / kw) * 60) }));
+        if (sel > 0 && m.priceNow !== null) parts.push(tr(lang, 'approx', { v: fmtMoney(sel * m.priceNow, h, 0) }));
+        sub = parts.join(' · ');
+      } else {
+        sub = sel > 0 ? tr(lang, 'until_t', { t: clockOf(m.now + sel * 60000, m.tz) }) : tr(lang, 'until_manual');
+      }
+      setText(r.chargeSub, sub);
 
-      // chips: rebuilt only when the list or language changes
-      const sig = q.join(',') + '|' + lang;
+      // "Час | Енергія" — only when the backend offers charge_energy
+      show(r.modeSeg, m.hasEnergy);
+      if (m.hasEnergy) {
+        setAttr(r.modeSeg, 'aria-label', tr(lang, 'mode_aria'));
+        setText(r.segTimeT, tr(lang, 'seg_time'));
+        setText(r.segEnergyT, tr(lang, 'seg_energy'));
+        setAttr(r.segTime, 'aria-pressed', energy ? 'false' : 'true');
+        setAttr(r.segEnergy, 'aria-pressed', energy ? 'true' : 'false');
+      }
+
+      // chips: rebuilt only when the list, mode or language changes
+      const sig = mode + '|' + q.join(',') + '|' + lang + '|' + loc;
       if (r.chips.__sig !== sig) {
-        const nodes = q.concat([0]).map((min) => {
+        const vals = energy ? q.slice() : q.concat([0]);
+        const units = q.length <= 4;
+        const nodes = vals.map((v) => {
           const b = document.createElement('button');
           b.type = 'button';
           b.className = 'chip';
-          b.textContent = chipLabel(lang, min);
-          if (!min) b.setAttribute('aria-label', tr(lang, 'no_limit'));
-          else b.setAttribute('aria-label', fmtDur(lang, min));
-          b.__min = min;
-          b.addEventListener('click', () => this._onChip(min));
+          if (energy) {
+            const n = document.createElement('span');
+            n.textContent = fmtK(v, loc);
+            b.appendChild(n);
+            if (units) {
+              const u = document.createElement('span');
+              u.className = 'cu';
+              u.textContent = tr(lang, 'kwh');
+              b.appendChild(u);
+            }
+            b.setAttribute('aria-label', fmtKwh(lang, v, loc));
+          } else {
+            b.textContent = chipLabel(lang, v);
+            b.setAttribute('aria-label', v ? fmtDur(lang, v) : tr(lang, 'no_limit'));
+          }
+          b.__val = v;
+          b.addEventListener('click', () => this._onChip(mode, v));
           return b;
         });
         r.chips.replaceChildren(...nodes);
@@ -1880,10 +2393,11 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
       setAttr(r.chips, 'aria-label', tr(lang, 'charge_for'));
       const kids = r.chips.children;
       for (let i = 0; i < kids.length; i += 1) {
-        setAttr(kids[i], 'aria-pressed', kids[i].__min === sel ? 'true' : 'false');
+        setAttr(kids[i], 'aria-pressed', kids[i].__val === sel ? 'true' : 'false');
         setDisabled(kids[i], dis);
       }
 
+      const what = energy ? (sel > 0 ? fmtKwh(lang, sel, loc) : null) : (sel > 0 ? fmtDur(lang, sel) : null);
       const useSlide = !m.charging && m.bypass;
       show(r.mainBtn, !useSlide);
       show(r.slide, useSlide);
@@ -1896,13 +2410,14 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
           setClass(r.mainBtn, 'main');
           setIcon(r.mainIcon, 'play', 20, 2.2);
           setText(r.mainLabel, busy === 'start' ? tr(lang, 'starting')
-            : sel > 0 ? tr(lang, 'charge_n', { d: fmtDur(lang, sel) }) : tr(lang, 'start'));
+            : what ? tr(lang, energy ? 'charge_kwh' : 'charge_n', { d: what, k: what }) : tr(lang, 'start'));
         }
-        setDisabled(r.mainBtn, dis || !!busy || (!m.charging && sel === 0 && !this._map['switch.charging']));
+        setDisabled(r.mainBtn, dis || !!busy || (!m.charging && !this._canStartSelected(m)));
       } else {
         setText(r.slideLabel, busy === 'start' ? tr(lang, 'starting') : tr(lang, 'slide'));
-        setAttr(r.slideKnob, 'aria-label', sel > 0 ? tr(lang, 'slide_aria', { d: fmtDur(lang, sel) }) : tr(lang, 'slide_aria_inf'));
-        setDisabled(r.slideKnob, dis);
+        setAttr(r.slideKnob, 'aria-label', what
+          ? tr(lang, energy ? 'slide_aria_kwh' : 'slide_aria', { d: what, k: what }) : tr(lang, 'slide_aria_inf'));
+        setDisabled(r.slideKnob, dis || !this._canStartSelected(m));
         setClass(r.slide, 'slide' + (dis ? ' dis' : '') + (r.slide.classList.contains('drag') ? ' drag' : ''));
         if (!busy && this._resetSlide && !r.slide.classList.contains('drag') && r.slideKnob.style.transform
           && r.slideKnob.style.transform !== 'translateX(0px)') {
@@ -2004,9 +2519,11 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
       const bypassNote = m.charging && m.nightOn && (m.boostActive || !m.inWin);
       show(r.bypass, bypassNote);
       if (bypassNote) {
-        setText(r.bypassText, m.mode === 'timed'
-          ? tr(lang, 'bypass_at', { t: clockOf(m.boostEnd, m.tz) })
-          : tr(lang, 'bypass_stop'));
+        let note;
+        if (m.mode === 'timed') note = tr(lang, 'bypass_at', { t: clockOf(m.boostEnd, m.tz) });
+        else if (m.mode === 'energy' && m.targetKwh !== null) note = tr(lang, 'bypass_energy', { k: fmtKwh(lang, m.targetKwh, numLocale(this._hass)) });
+        else note = tr(lang, 'bypass_stop');
+        setText(r.bypassText, note);
       }
 
       show(r.wkRow, m.hasWeekend);
@@ -2020,19 +2537,25 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 
     _renderEnergy(m, lang, h) {
       const r = this._r;
-      const has = m.hasSession || m.hasMonth;
+      const ids = this._statIds();
+      const useStats = !!ids && !!h && typeof h.callWS === 'function';
+      const has = m.hasSession || m.hasMonth || useStats;
       show(r.energyPanel, has);
       if (!has) return;
       const loc = numLocale(h);
-      const price = this._config.price_per_kwh;
       setText(r.energyTitle, tr(lang, 'energy'));
       if (m.hasMonth && m.month !== null) {
         const mo = m.curMonth >= 1 && m.curMonth <= 12 ? m.curMonth : m.nowMonth;
-        let s = monthName(lang, mo) + ' · ' + fmtNum(m.month, 1, loc) + ' ' + tr(lang, 'kwh');
-        if (price !== null) s += ' · ' + fmtMoney(m.month * price, h, 0);
-        setText(r.energySub, s);
+        setText(r.energySub, monthName(lang, mo) + ' · ' + fmtNum(m.month, 1, loc) + ' ' + tr(lang, 'kwh'));
       } else {
         setText(r.energySub, '');
+      }
+      // HA long-term statistics of the tariff sensors; the session bars stay as the fallback for older backends
+      show(r.statBox, useStats);
+      show(r.sessBox, !useStats);
+      if (useStats) {
+        this._renderStats(m, lang, h, ids);
+        return;
       }
 
       const list = m.history.slice(0, 5).reverse().map((x) => ({
@@ -2074,6 +2597,411 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
         setAttr(r.bars, 'aria-label', tr(lang, 'energy_aria') + ': '
           + list.map((b) => b.label + ' ' + fmtNum(b.kwh, 1, loc) + ' ' + unit).join(', '));
         r.bars.__sig = sig;
+      }
+    }
+
+    /* ------------------------------------------------ statistics (День · Тиждень · Місяць · Рік) */
+
+    _statIds() {
+      const d = this._map['sensor.energy_day_tariff'];
+      const n = this._map['sensor.energy_night_tariff'];
+      if (!d || !n) return null;
+      const c = this._map['sensor.energy_cost'];
+      return c ? [d, n, c] : [d, n];
+    }
+
+    _bindStats() {
+      const r = this._r;
+      this._statSel = null;
+      this._statBy = null;
+      r.perPrev.addEventListener('click', () => this._statNav(-1));
+      r.perNext.addEventListener('click', () => this._statNav(1));
+      const pick = (e, how) => {
+        const n = this._statN || 0;
+        if (!n) return;
+        const rect = r.plot.getBoundingClientRect();
+        if (!rect || !rect.width) return;
+        const i = clamp(Math.floor(((e.clientX - rect.left) / rect.width) * n), 0, n - 1);
+        if (how === 'click' && this._statBy === 'click' && this._statSel === i) this._setStatSel(null, null);
+        else this._setStatSel(i, how);
+      };
+      // mouse/pen hover reads a bar; touch taps toggle it (touch moves stay page scrolls)
+      r.plot.addEventListener('pointermove', (e) => {
+        if (e.pointerType === 'mouse' || e.pointerType === 'pen') pick(e, 'hover');
+      });
+      r.plot.addEventListener('pointerleave', () => {
+        if (this._statBy === 'hover') this._setStatSel(null, null);
+      });
+      r.plot.addEventListener('click', (e) => pick(e, 'click'));
+      r.chart.addEventListener('keydown', (e) => {
+        const n = this._statN || 0;
+        if (!n) return;
+        const last = this._statLast >= 0 ? this._statLast : n - 1;
+        const cur = this._statSel;
+        let i;
+        if (e.key === 'ArrowRight') i = cur === null ? 0 : Math.min(n - 1, cur + 1);
+        else if (e.key === 'ArrowLeft') i = cur === null ? last : Math.max(0, cur - 1);
+        else if (e.key === 'Home') i = 0;
+        else if (e.key === 'End') i = last;
+        else if (e.key === 'Escape') i = null;
+        else return;
+        e.preventDefault();
+        this._setStatSel(i, i === null ? null : 'key');
+      });
+    }
+
+    _setStatSel(i, how) {
+      if (this._statSel === i && this._statBy === how) return;
+      this._statSel = i;
+      this._statBy = how;
+      this._update();
+    }
+
+    _statNav(d) {
+      const off = (this._statOffset || 0) + d;
+      if (off > 0) return;
+      this._statOffset = off;
+      this._statSel = null;
+      this._statBy = null;
+      this._update();
+    }
+
+    _setPeriod(p) {
+      if (this._statPeriod === p && !this._statOffset) return;
+      this._statPeriod = p;
+      this._statOffset = 0;
+      this._statSel = null;
+      this._statBy = null;
+      this._update();
+    }
+
+    /* One recorder/statistics_during_period call per view; results are cached per period. */
+    _loadStats(rg, ids, key) {
+      const h = this._hass;
+      const cache = this._statCache || (this._statCache = new Map());
+      let e = cache.get(key);
+      if (!e) {
+        e = { buckets: null, status: 'loading', at: 0, okAt: 0, rev: 0, inflight: false };
+        cache.set(key, e);
+        while (cache.size > 48) cache.delete(cache.keys().next().value);
+      }
+      e.inflight = true;
+      e.at = Date.now();
+      const msg = {
+        type: 'recorder/statistics_during_period',
+        start_time: new Date(rg.start).toISOString(),
+        end_time: new Date(rg.end).toISOString(),
+        statistic_ids: ids.slice(),
+        period: rg.stat,
+        types: ['change'],
+        units: { energy: 'kWh' },
+      };
+      let p;
+      try {
+        p = h.callWS(msg);
+      } catch (err) {
+        p = Promise.reject(err);
+      }
+      Promise.resolve(p).then((res) => {
+        e.buckets = mergeStats(rg, ids, res);
+        e.status = 'ok';
+        e.okAt = Date.now();
+      }, (err) => {
+        // a failed refresh keeps the last good data; a failed first load retries after a minute
+        e.status = e.buckets ? 'ok' : 'error';
+        // eslint-disable-next-line no-console
+        console.warn('[electros-card] statistics:', (err && (err.message || err.code)) || err);
+      }).then(() => {
+        e.inflight = false;
+        e.at = Date.now();
+        e.rev += 1;
+        this._update();
+      });
+    }
+
+    _periodTitle(rg, lang, tz) {
+      const b0 = rg.buckets[0].start;
+      if (rg.period === 'day') {
+        if (rg.offset === 0) return tr(lang, 'today');
+        if (rg.offset === -1) return tr(lang, 'yesterday');
+        const opts = zoneParts(b0, tz).y === rg.nowYear
+          ? { weekday: 'short', day: 'numeric', month: 'long' } : { day: 'numeric', month: 'long', year: 'numeric' };
+        return dtf(lang, tz, opts).format(b0);
+      }
+      if (rg.period === 'week') {
+        const last = rg.buckets[rg.buckets.length - 1].start;
+        const f = dtf(lang, tz, { day: 'numeric', month: 'short' });
+        const y = zoneParts(last, tz).y;
+        return f.format(b0) + ' – ' + f.format(last) + (y !== rg.nowYear ? ' ' + y : '');
+      }
+      const p = zoneParts(b0, tz);
+      if (rg.period === 'month') {
+        const name = monthName(lang, p.mo);
+        return name.charAt(0).toUpperCase() + name.slice(1) + ' ' + p.y;
+      }
+      return String(p.y);
+    }
+
+    _renderStats(m, lang, h, ids) {
+      const r = this._r;
+      const loc = numLocale(h);
+      const tz = m.tz;
+      if (!this._statPeriod) this._statPeriod = this._config.stats_period;
+      const period = this._statPeriod;
+      const offset = this._statOffset || 0;
+      const np = zoneParts(m.now, tz);
+      const rkey = period + '|' + offset + '|' + np.y + '-' + np.mo + '-' + np.d + '|' + (tz || '');
+      if (!this._srange || this._srange.rkey !== rkey) {
+        this._srange = statRange(period, offset, m.now, tz);
+        this._srange.rkey = rkey;
+      }
+      const rg = this._srange;
+      const key = rg.stat + '|' + rg.start + '|' + rg.end + '|' + ids.join(',');
+      const cache = this._statCache || (this._statCache = new Map());
+      let e = cache.get(key);
+      // the current period is re-read at most once a minute (and only while the card is on
+      // screen: HA keeps feeding hass to cached views). A past period is final once it was
+      // read well after it ended: HA compiles an hour's statistics only after that hour, so
+      // a view cached while it was current (e.g. today at 23:59) still misses its last hour.
+      const final = !!e && e.okAt > rg.end + STAT_FINAL_AFTER;
+      const want = !e || (!e.inflight && Date.now() - e.at > STAT_TTL && (offset === 0 || !final));
+      if (want && this.isConnected !== false) {
+        this._loadStats(rg, ids, key);
+        e = cache.get(key);
+      }
+      if (!e) e = { buckets: null, status: 'loading', rev: 0 };
+
+      if (r.perSeg.__sig !== lang) {
+        const nodes = PERIODS.map((p) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = tr(lang, 'p_' + p);
+          b.__p = p;
+          b.addEventListener('click', () => this._setPeriod(p));
+          return b;
+        });
+        r.perSeg.replaceChildren(...nodes);
+        r.perSeg.__sig = lang;
+      }
+      setAttr(r.perSeg, 'aria-label', tr(lang, 'period_aria'));
+      const segs = r.perSeg.children;
+      for (let i = 0; i < segs.length; i += 1) setAttr(segs[i], 'aria-pressed', segs[i].__p === period ? 'true' : 'false');
+      if (rg.__tl !== lang) {
+        rg.title = this._periodTitle(rg, lang, tz);
+        rg.__tl = lang;
+      }
+      setText(r.perTitle, rg.title);
+      setAttr(r.perPrev, 'aria-label', tr(lang, 'prev_aria'));
+      setAttr(r.perPrev, 'title', tr(lang, 'prev_aria'));
+      setAttr(r.perNext, 'aria-label', tr(lang, 'next_aria'));
+      setAttr(r.perNext, 'title', tr(lang, 'next_aria'));
+      setDisabled(r.perPrev, offset <= -240);
+      setDisabled(r.perNext, offset >= 0);
+
+      if (!e.buckets) {
+        // keep the previous frame (dimmed) while another period loads; first load / errors get the box
+        const keep = e.status === 'loading' && this._statShown;
+        setClass(r.chart, 'chart' + (keep ? ' stale' : ''));
+        if (!keep) {
+          show(r.chart, false);
+          show(r.legend, false);
+          show(r.tot, false);
+          show(r.save, false);
+          show(r.statEmpty, true);
+          setText(r.statEmptyT, e.status === 'error' ? tr(lang, 'stat_error') : tr(lang, 'loading'));
+          show(r.statEmptyS, false);
+          this._statN = 0;
+          r.plot.__sig = null;
+        }
+        return;
+      }
+
+      const now = m.now;
+      const cols = rg.buckets.map((b, i) => {
+        const s = e.buckets[i];
+        const future = b.start > now;
+        let fb = 0;
+        // Рік: months HA has no statistics for fall back to the charger's own counter (not split by zone).
+        // The device keeps Jan..Dec slots: up to the current month they are this year, after it last year.
+        if (rg.period === 'year' && !s.has && !future && m.months && m.curMonth >= 1 && m.curMonth <= 12) {
+          const mine = (b.year === rg.nowYear && b.month <= m.curMonth) || (b.year === rg.nowYear - 1 && b.month > m.curMonth);
+          if (mine) fb = Math.max(0, finite(m.months[b.month - 1], 0));
+        }
+        return { day: s.day, night: s.night, cost: s.hasCost ? s.cost : null, fb, has: s.has, future, cur: b.start <= now && now < b.end };
+      });
+      const empty = !cols.some((c) => c.has || c.fb > 0);
+      setClass(r.chart, 'chart');
+      show(r.chart, !empty);
+      show(r.legend, !empty);
+      show(r.tot, !empty);
+      show(r.statEmpty, empty);
+      if (empty) {
+        setText(r.statEmptyT, tr(lang, 'stat_empty'));
+        setText(r.statEmptyS, tr(lang, 'stat_empty_sub'));
+        show(r.statEmptyS, true);
+        show(r.save, false);
+        this._statN = 0;
+        this._statShown = false;
+        r.plot.__sig = null;
+        return;
+      }
+      const curIdx = cols.findIndex((c) => c.cur);
+      const sel = Number.isInteger(this._statSel) && this._statSel < cols.length ? this._statSel : null;
+      const sig = [key, e.rev, lang, loc, h.config && h.config.currency, curIdx, sel, m.priceDay, m.priceNight,
+        rg.period === 'year' ? JSON.stringify(m.months) + '/' + m.curMonth : ''].join('|');
+      this._statShown = true;
+      if (r.plot.__sig === sig) return;
+      r.plot.__sig = sig;
+      this._statN = cols.length;
+      let last = -1;
+      cols.forEach((c, i) => {
+        if (!c.future) last = i;
+      });
+      this._statLast = last;
+      this._drawStats(rg, cols, sel, lang, loc, h, m);
+    }
+
+    _drawStats(rg, cols, sel, lang, loc, h, m) {
+      const r = this._r;
+      const tz = m.tz;
+      const H = 120;
+      const unit = tr(lang, 'kwh');
+      const el = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text !== undefined) n.textContent = text;
+        return n;
+      };
+
+      // y scale: hairline gridlines at 0, half and a clean maximum; labels in the right gutter
+      const top = niceCeil(Math.max(0, ...cols.map((c) => c.day + c.night + c.fb)));
+      const grid = [];
+      for (const v of [0, top / 2, top]) {
+        const y = Math.min(H - 1, (v / top) * H);
+        const g = el('div', 'gl');
+        g.style.setProperty('bottom', y.toFixed(1) + 'px');
+        grid.push(g);
+        if (v > 0) {
+          const t = el('span', 'yl', fmtNum(v, Number.isInteger(v) ? 0 : 1, loc));
+          t.style.setProperty('bottom', y.toFixed(1) + 'px');
+          grid.push(t);
+        }
+      }
+      r.sgrid.replaceChildren(...grid);
+
+      // stacked columns: night (cheap) at the base, day (expensive) on top, 2px surface gap between
+      const colEls = cols.map((c, i) => {
+        const col = el('div', 'col' + (i === sel ? ' on' : ''));
+        const parts = [];
+        if (c.night > 0) parts.push(['n', c.night]);
+        if (c.day > 0) parts.push(['d', c.day]);
+        if (c.fb > 0) parts.push(['f', c.fb]);
+        if (parts.length) {
+          const total = c.day + c.night + c.fb;
+          const avail = Math.max(2, (total / top) * H - 2 * (parts.length - 1));
+          const stk = el('div', 'stk');
+          for (const [k, v] of parts) {
+            const sg = el('div', 'sg ' + k);
+            sg.style.setProperty('height', Math.max(2, (v / total) * avail).toFixed(1) + 'px');
+            stk.appendChild(sg);
+          }
+          col.appendChild(stk);
+        }
+        return col;
+      });
+      r.plot.replaceChildren(...colEls);
+      setClass(r.plot, 'plot' + (sel !== null ? ' hs' : ''));
+
+      // x labels (sparse for hours/days so they never collide)
+      const wdF = rg.period === 'week' ? dtf(lang, tz, { weekday: 'short' }) : null;
+      const moF = rg.period === 'year' ? dtf(lang, tz, { month: 'short' }) : null;
+      const xl = rg.buckets.map((b, i) => {
+        let t = '';
+        if (rg.period === 'day') {
+          const hh = zoneParts(b.start, tz).h;
+          if (hh % 6 === 0) t = pad(hh);
+        } else if (rg.period === 'week') {
+          t = wdF.format(b.start);
+        } else if (rg.period === 'month') {
+          const d = zoneParts(b.start, tz).d;
+          if (d === 1 || d % 5 === 0) t = String(d);
+        } else {
+          // 12 slots are narrow: at most three letters ("січ", "лют", "Jan")
+          t = moF.format(b.start).replace(/\.$/, '').slice(0, 3);
+        }
+        return el('span', cols[i].cur ? 'cur' : '', t);
+      });
+      r.xl.replaceChildren(...xl);
+
+      // totals
+      let dayK = 0;
+      let nightK = 0;
+      let fbK = 0;
+      let cost = 0;
+      let costKnown = false;
+      for (const c of cols) {
+        dayK += c.day;
+        nightK += c.night;
+        fbK += c.fb;
+        if (c.cost !== null) {
+          cost += c.cost;
+          costKnown = true;
+        }
+      }
+      const pd = m.priceDay;
+      const pn = m.priceNight;
+      if (!costKnown && pd !== null && pn !== null && dayK + nightK > 0) {
+        cost = dayK * pd + nightK * pn; // no cost statistics yet: same accounting with today's prices
+        costKnown = true;
+      }
+      const total = dayK + nightK + fbK;
+
+      // readout = the bar tooltip (hover, tap or arrow keys); otherwise the y-axis unit
+      const read = [];
+      if (sel !== null) {
+        const b = rg.buckets[sel];
+        const c = cols[sel];
+        let lab;
+        if (rg.period === 'day') lab = pad(zoneParts(b.start, tz).h) + ':00–' + pad(zoneParts(b.end, tz).h) + ':00';
+        else if (rg.period === 'year') lab = monthName(lang, b.month) + ' ' + b.year;
+        else lab = dtf(lang, tz, { weekday: 'short', day: 'numeric', month: 'long' }).format(b.start);
+        read.push(el('b', '', c.future ? '—' : fmtKwh(lang, c.day + c.night + c.fb, loc)));
+        read.push(el('span', 'lab', lab));
+        if (c.has) {
+          read.push(el('span', 'k d'), el('span', '', fmtK(c.day, loc)));
+          read.push(el('span', 'k n'), el('span', '', fmtK(c.night, loc)));
+          if (c.cost !== null) read.push(el('span', '', '· ' + fmtCost(c.cost, h)));
+        } else if (c.fb > 0) {
+          read.push(el('span', 'k f'), el('span', '', tr(lang, 'no_split_note')));
+        }
+      } else {
+        read.push(el('span', '', unit));
+      }
+      r.statRead.replaceChildren(...read);
+      setAttr(r.chart, 'aria-label', tr(lang, 'stat_aria', { p: rg.title, v: fmtKwh(lang, total, loc) }));
+
+      const lg = (k, label, v) => {
+        const s = el('span', 'lg');
+        s.appendChild(el('span', 'sw2 ' + k));
+        s.appendChild(el('span', '', label));
+        s.appendChild(el('b', '', fmtKwh(lang, v, loc)));
+        return s;
+      };
+      const legend = [lg('d', tr(lang, 'tariff_day'), dayK), lg('n', tr(lang, 'tariff_night'), nightK)];
+      if (fbK > 0) legend.push(lg('f', tr(lang, 'no_split'), fbK));
+      r.legend.replaceChildren(...legend);
+
+      setText(r.totL1, tr(lang, 'total'));
+      setText(r.totV1, fmtK(total, loc));
+      setText(r.totU1, ' ' + unit);
+      setText(r.totL2, tr(lang, 'cost'));
+      setText(r.totV2, costKnown ? fmtCost(cost, h) : '—');
+
+      const savings = pd !== null && pn !== null && pd > pn && nightK > 0 ? nightK * (pd - pn) : null;
+      show(r.save, savings !== null);
+      if (savings !== null) {
+        setText(r.saveL, tr(lang, 'savings'));
+        setText(r.saveV, fmtCost(savings, h));
       }
     }
   }
@@ -2237,9 +3165,7 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
         this._stopCharge();
         this._update();
       });
-      r.mPlus.addEventListener('click', () => {
-        if (this._m && !this._m.offline) this._extend(15);
-      });
+      r.mPlus.addEventListener('click', () => this._plus());
       r.mGo.addEventListener('click', () => {
         const m = this._m;
         if (!m || m.offline || this._busy) return;
@@ -2302,7 +3228,8 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
           setAttr(r.sProg, 'stroke-dashoffset', (TILE_C * (1 - frac)).toFixed(2));
           show(r.sProg, frac > 0);
           let foot;
-          if (m.mode === 'timed') foot = tr(lang, 'left_d', { d: fmtDur(lang, Math.floor(m.remaining / 60)) });
+          if (m.mode === 'energy') foot = this._ofTarget(m, lang, loc);
+          else if (m.mode === 'timed') foot = tr(lang, 'left_d', { d: fmtDur(lang, Math.floor(m.remaining / 60)) });
           else if (m.mode === 'unlimited') foot = tr(lang, 'no_limit_l');
           else if (m.mode === 'schedule') foot = tr(lang, 'until_t', { t: fmtHM(m.tEnd) });
           else foot = kwh;
@@ -2368,10 +3295,16 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
         setText(r.mKw, fmtNum(m.kw, 1, loc));
         setText(r.mKwU, tr(lang, 'kw'));
         const parts = [];
-        if (m.mode === 'timed') parts.push(tr(lang, 'until_t', { t: clockOf(m.boostEnd, m.tz) }));
-        else if (m.mode === 'unlimited') parts.push(tr(lang, 'no_limit_l'));
-        else if (m.mode === 'schedule') parts.push(tr(lang, 'until_t', { t: fmtHM(m.tEnd) }));
-        parts.push(kwh);
+        if (m.mode === 'energy') {
+          // "4,2 з 10 кВт·год · ≈ 22:05 · 32 А"
+          parts.push(this._ofTarget(m, lang, loc));
+          parts.push(m.etaMs !== null ? tr(lang, 'approx', { v: clockOf(m.etaMs, m.tz) }) : tr(lang, 'eta_unknown'));
+        } else {
+          if (m.mode === 'timed') parts.push(tr(lang, 'until_t', { t: clockOf(m.boostEnd, m.tz) }));
+          else if (m.mode === 'unlimited') parts.push(tr(lang, 'no_limit_l'));
+          else if (m.mode === 'schedule') parts.push(tr(lang, 'until_t', { t: fmtHM(m.tEnd) }));
+          parts.push(kwh);
+        }
         const a = m.amps !== null && m.amps !== undefined ? m.amps : m.measured;
         if (a !== null && a !== undefined) parts.push(fmtNum(a, Number.isInteger(a) ? 0 : 1, loc) + ' ' + tr(lang, 'a'));
         setText(r.mLine, parts.join(' · '));
@@ -2379,9 +3312,11 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
         setAttr(r.mStop, 'aria-label', busy === 'stop' ? tr(lang, 'stopping') : tr(lang, 'stop'));
         setAttr(r.mStop, 'title', tr(lang, 'stop'));
         setDisabled(r.mStop, m.offline || busy === 'stop');
-        show(r.mPlus, m.mode === 'timed' || m.mode === 'unlimited');
-        setText(r.mPlusT, tr(lang, 'plus15'));
-        setAttr(r.mPlus, 'aria-label', tr(lang, 'plus15_aria'));
+        show(r.mPlus, m.mode === 'timed' || m.mode === 'unlimited' || m.mode === 'energy');
+        const pl = this._plusLabel(m, lang);
+        setText(r.mPlusT, pl.text);
+        setAttr(r.mPlus, 'aria-label', pl.aria);
+        setDisabled(r.mPlus, m.offline);
         return;
       }
 
@@ -2478,7 +3413,6 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
       const schema = [
         // `filter` is the current HA form, `integration` the legacy one; both restrict the picker to our devices
         { name: 'device_id', required: true, selector: { device: { integration: DOMAIN, filter: { integration: DOMAIN } } } },
-        { name: 'price_per_kwh', selector: { number: { min: 0, max: 1000, step: 0.01, mode: 'box' } } },
         {
           name: 'theme',
           selector: {
@@ -2504,6 +3438,19 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
           },
         },
       ];
+      if (!this._tile()) {
+        schema.push({
+          name: 'quick_kwh',
+          selector: {
+            select: {
+              multiple: true,
+              custom_value: true,
+              mode: 'dropdown',
+              options: QUICK_KWH_OPTIONS.map((k) => ({ value: String(k), label: fmtKwh(lang, k, numLocale(this._hass)) })),
+            },
+          },
+        });
+      }
       if (this._tile()) {
         schema.push({
           name: 'size',
@@ -2526,10 +3473,10 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
       const q = Array.isArray(c.quick_minutes) ? c.quick_minutes : DEFAULT_QUICK;
       const d = {
         device_id: c.device_id || undefined,
-        price_per_kwh: c.price_per_kwh === null || c.price_per_kwh === '' ? undefined : c.price_per_kwh,
         theme: c.theme || 'auto',
         quick_minutes: q.map((x) => String(x)),
       };
+      if (!this._tile()) d.quick_kwh = normalizeKwhList(c.quick_kwh).map((x) => String(x));
       if (this._tile()) d.size = c.size === 'small' ? 'small' : 'medium';
       return d;
     }
@@ -2554,14 +3501,14 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
       const cfg = Object.assign({}, this._config);
       if (v.device_id) cfg.device_id = v.device_id;
       else delete cfg.device_id;
-      const price = Number(v.price_per_kwh);
-      if (v.price_per_kwh === undefined || v.price_per_kwh === null || v.price_per_kwh === '' || !Number.isFinite(price)) delete cfg.price_per_kwh;
-      else cfg.price_per_kwh = price;
+      // the v2.0 price_per_kwh option is gone (cost comes from the backend); drop it when the card is re-saved
+      delete cfg.price_per_kwh;
       cfg.theme = ['auto', 'light', 'dark'].includes(v.theme) ? v.theme : 'auto';
       const q = (Array.isArray(v.quick_minutes) ? v.quick_minutes : [])
         .map((x) => Math.round(Number(x)))
         .filter((x) => Number.isFinite(x) && x >= 1 && x <= 1440);
       cfg.quick_minutes = q.length ? Array.from(new Set(q)).sort((a, b) => a - b).slice(0, 5) : DEFAULT_QUICK.slice();
+      if (!this._tile()) cfg.quick_kwh = normalizeKwhList(Array.isArray(v.quick_kwh) ? v.quick_kwh : []);
       if (this._tile()) cfg.size = v.size === 'small' ? 'small' : 'medium';
       this._config = cfg;
       fire(this, 'config-changed', { config: cfg });
@@ -2587,6 +3534,7 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
   // Exposed for dev/smoke.mjs and debugging; not part of the public contract.
   ElectrosCard._internals = {
     VERSION, buildMap, firstDevice, computeModel, normalizeConfig, inWindow, fmtDur, fmtCountdown, parseHM, fmtHM, tr, langOf, pillFor,
+    zonedMs, statRange, mergeStats, niceCeil, normalizeKwhList, lastErrorText, I18N,
   };
 
   const navLang = (() => {
@@ -2597,18 +3545,18 @@ ha-card{height:100%;border-radius:var(--es-radius,30px);background:var(--tile-ba
     }
   })();
   const DESC = {
-    uk: ['Зарядка ElectroS: потужність, таймер «зарядити на N хв», струм, нічний тариф і енергія.', 'Компактна плитка ElectroS (мала або середня) зі статусом і кнопкою старт/стоп.'],
-    ru: ['Зарядка ElectroS: мощность, «зарядить на N мин», ток, ночной тариф и энергия.', 'Компактная плитка ElectroS (маленькая или средняя) со статусом и кнопкой старт/стоп.'],
-    en: ['ElectroS charger: live power, "charge for N min", current, night rate and energy.', 'Compact ElectroS tile (small or medium) with status and start/stop.'],
+    uk: ['Зарядка ElectroS: потужність, «зарядити на N хв / N кВт·год», струм, нічний тариф, статистика день/ніч і вартість.', 'Компактна плитка ElectroS (мала або середня) зі статусом і кнопкою старт/стоп.'],
+    ru: ['Зарядка ElectroS: мощность, «зарядить на N мин / N кВт·ч», ток, ночной тариф, статистика день/ночь и стоимость.', 'Компактная плитка ElectroS (маленькая или средняя) со статусом и кнопкой старт/стоп.'],
+    en: ['ElectroS charger: live power, "charge for N min / N kWh", current, night rate, day/night statistics and cost.', 'Compact ElectroS tile (small or medium) with status and start/stop.'],
   }[I18N[navLang] ? navLang : 'en'];
 
   window.customCards = window.customCards || [];
   const register = (o) => {
     if (!window.customCards.some((c) => c && c.type === o.type)) window.customCards.push(o);
   };
-  register({ type: 'electros-card', name: 'ElectroS', description: DESC[0], preview: true, documentationURL: DOCS_URL });
-  register({ type: 'electros-tile', name: 'ElectroS tile', description: DESC[1], preview: true, documentationURL: DOCS_URL });
+  register({ type: 'electros-card', name: 'Струм', description: DESC[0], preview: true, documentationURL: DOCS_URL });
+  register({ type: 'electros-tile', name: 'Струм — плитка', description: DESC[1], preview: true, documentationURL: DOCS_URL });
 
   // eslint-disable-next-line no-console
-  console.info('%c ELECTROS-CARD %c ' + VERSION + ' ', 'color:#04210E;background:#30D158;font-weight:700', 'color:#30D158;background:#07090C');
+  console.info('%c STRUM · ELECTROS-CARD %c ' + VERSION + ' ', 'color:#04210E;background:#30D158;font-weight:700', 'color:#30D158;background:#07090C');
 })();

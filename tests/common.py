@@ -15,7 +15,10 @@ from unittest.mock import patch
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.electros_ev import protocol
 from custom_components.electros_ev.charger_api import ElectroSError
@@ -56,15 +59,57 @@ EXPECTED_ENTITIES: dict[tuple[str, str], str] = {
     ("sensor", "session_energy"): "session_energy",
     ("sensor", "month_energy"): "month_energy",
     ("sensor", "boost_end"): "boost_end",
+    ("sensor", "energy_day_tariff"): "energy_day_tariff",
+    ("sensor", "energy_night_tariff"): "energy_night_tariff",
+    ("sensor", "energy_cost"): "energy_cost",
+    ("sensor", "current_price"): "current_price",
     ("switch", "charging"): "charging_switch",
     ("switch", "night_timer"): "night_timer",
     ("switch", "weekend_free"): "weekend_free",
     ("number", "charging_amps"): "charging_amps",
     ("number", "boost_minutes"): "boost_minutes",
+    ("number", "boost_kwh"): "boost_kwh",
+    ("number", "price_day"): "price_day",
+    ("number", "price_night"): "price_night",
     ("time", "timer_start"): "timer_start",
     ("time", "timer_end"): "timer_end",
     ("button", "boost"): "boost",
+    ("button", "boost_energy"): "boost_energy",
     ("button", "reset_energy"): "reset_energy",
+}
+
+
+#: (platform, translation_key) -> entity_id of a new install, without the
+#: ``electros_<login>_`` prefix. Home Assistant builds entity ids from the
+#: English names (also for a Ukrainian or Russian UI); README.md and examples/
+#: use these ids.
+ENTITY_OBJECT_IDS: dict[tuple[str, str], str] = {
+    ("sensor", "status"): "status",
+    ("sensor", "configured_current"): "configured_current",
+    ("sensor", "measured_current"): "measured_current",
+    ("sensor", "voltage"): "mains_voltage",
+    ("sensor", "power"): "charging_power",
+    ("sensor", "energy"): "consumed_energy",
+    ("sensor", "session_energy"): "session_energy",
+    ("sensor", "month_energy"): "energy_this_month",
+    ("sensor", "boost_end"): "boost_ends",
+    ("sensor", "energy_day_tariff"): "energy_day_tariff",
+    ("sensor", "energy_night_tariff"): "energy_night_tariff",
+    ("sensor", "energy_cost"): "energy_cost",
+    ("sensor", "current_price"): "current_price",
+    ("switch", "charging"): "charging",
+    ("switch", "night_timer"): "night_timer",
+    ("switch", "weekend_free"): "free_charging_on_weekends",
+    ("number", "charging_amps"): "charging_current",
+    ("number", "boost_minutes"): "boost_duration",
+    ("number", "boost_kwh"): "boost_kwh",
+    ("number", "price_day"): "price_day",
+    ("number", "price_night"): "price_night",
+    ("time", "timer_start"): "night_window_start",
+    ("time", "timer_end"): "night_window_end",
+    ("button", "boost"): "charge_now_boost",
+    ("button", "boost_energy"): "charge_energy_boost",
+    ("button", "reset_energy"): "reset_kwh",
 }
 
 
@@ -332,6 +377,66 @@ def stored(hass_storage: dict[str, Any]) -> dict[str, Any]:
     return hass_storage[STORE_KEY]["data"]
 
 
-def storage_payload(data: dict[str, Any]) -> dict[str, Any]:
-    """A Store file for the test entry, to pre-load ``hass_storage``."""
-    return {"version": 1, "minor_version": 1, "key": STORE_KEY, "data": data}
+def storage_payload(data: dict[str, Any], version: int = 1) -> dict[str, Any]:
+    """A Store file for the test entry, to pre-load ``hass_storage``.
+
+    Version 1 (the v2.0.0 schema) by default, so restart tests also run the
+    migration to the current schema.
+    """
+    return {"version": version, "minor_version": 1, "key": STORE_KEY, "data": data}
+
+
+# --------------------------------------------------------------------------- #
+# Driving the integration like a user / the clock
+# --------------------------------------------------------------------------- #
+
+
+async def async_fire_at(hass: HomeAssistant, freezer: Any, moment: datetime) -> None:
+    """Move the frozen clock to ``moment`` and run every timer due by then."""
+    freezer.move_to(moment)
+    async_fire_time_changed(hass, moment)
+    await async_settle(hass)
+
+
+async def async_call(hass: HomeAssistant, service: str, **data: Any) -> None:
+    """Call an electros_ev service for the test charger."""
+    await hass.services.async_call(
+        DOMAIN, service, {"device_id": device_id(hass), **data}, blocking=True
+    )
+    await async_settle(hass)
+
+
+async def async_switch(hass: HomeAssistant, key: str, on: bool) -> None:
+    """Turn a switch of the charger on or off."""
+    await hass.services.async_call(
+        "switch",
+        "turn_on" if on else "turn_off",
+        {"entity_id": entity_id(hass, "switch", key)},
+        blocking=True,
+    )
+    await async_settle(hass)
+
+
+async def async_press(hass: HomeAssistant, key: str) -> None:
+    """Press a button of the charger."""
+    await hass.services.async_call(
+        "button", "press", {"entity_id": entity_id(hass, "button", key)}, blocking=True
+    )
+    await async_settle(hass)
+
+
+async def async_set_number(hass: HomeAssistant, key: str, value: float) -> None:
+    """Set a number entity of the charger."""
+    await hass.services.async_call(
+        "number",
+        "set_value",
+        {"entity_id": entity_id(hass, "number", key), "value": value},
+        blocking=True,
+    )
+    await async_settle(hass)
+
+
+def boost_state(hass: HomeAssistant) -> tuple[str, dict[str, Any]]:
+    """State and attributes of sensor.boost_end."""
+    current = state(hass, "sensor", "boost_end")
+    return current.state, dict(current.attributes)

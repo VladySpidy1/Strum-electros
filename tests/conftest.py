@@ -15,11 +15,14 @@ import pytest
 
 HAS_HA_HARNESS = importlib.util.find_spec("pytest_homeassistant_custom_component") is not None
 
+#: Test modules of the pure (stdlib-only) modules; they run without Home Assistant.
+PURE_TEST_MODULES = {"test_protocol.py", "test_tariff.py"}
+
 if not HAS_HA_HARNESS:
     collect_ignore = [
         path.name
         for path in Path(__file__).parent.glob("test_*.py")
-        if path.name != "test_protocol.py"
+        if path.name not in PURE_TEST_MODULES
     ]
 else:
     from homeassistant.core import HomeAssistant
@@ -31,6 +34,20 @@ else:
     @pytest.fixture(autouse=True)
     def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
         """Load custom_components/electros_ev in every test."""
+
+    @pytest.fixture(autouse=True)
+    def no_web_frontend(hass: HomeAssistant) -> None:
+        """Treat the http and frontend dependencies as set up, without setting them up.
+
+        The integration depends on http and frontend (for its Lovelace card).
+        Setting up the real frontend needs the home-assistant-frontend wheel
+        (hass_frontend) and would start a web server; the tests need neither.
+        With both marked as loaded, Home Assistant skips their setup, and
+        ``async_register_card`` sees no HTTP server and registers nothing
+        (test_entities.py tests the registration with a mocked ``hass.http``).
+        """
+        hass.config.components.add("http")
+        hass.config.components.add("frontend")
 
     @pytest.fixture(autouse=True)
     def no_network() -> Generator[None]:
@@ -59,10 +76,6 @@ else:
     async def kyiv(hass: HomeAssistant) -> None:
         """Run the test in the charger's real time zone (Europe/Kyiv)."""
         await hass.config.async_set_time_zone("Europe/Kyiv")
-        # The integration depends on http and frontend. The tests do not start a
-        # web server; marking them loaded keeps the setup minimal.
-        hass.config.components.add("http")
-        hass.config.components.add("frontend")
 
     @pytest.fixture
     def charger(kyiv: None) -> FakeCharger:

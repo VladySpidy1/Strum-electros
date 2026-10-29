@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "ElectroS EV Charger",
+        "title": "Strum — smart ElectroS charging",
         "description": "Enter the charger login (device name). For a direct connection on your network set the charger's local IP/host; then the password is optional. Without a host the cloud (electros.org.ua) is used and the password is required.",
         "data": {
           "charger_login": "Login (device name)",
@@ -26,18 +26,22 @@
   "options": {
     "step": {
       "init": {
-        "title": "ElectroS options",
-        "description": "Changing the host reconnects the integration. Leave the host blank to use the cloud (needs the password entered at setup).",
+        "title": "Strum options",
+        "description": "Changing the host reconnects the integration. Leave the host blank to use the cloud (needs the password entered at setup). The night tariff zone is used only for the day/night energy split and the cost; it is independent of the charger's night timer.",
         "data": {
           "host": "Local IP/host (optional, leave blank for cloud)",
-          "scan_interval": "Update interval (seconds)"
+          "scan_interval": "Update interval (seconds)",
+          "tariff_night_start": "Night tariff starts",
+          "tariff_night_end": "Night tariff ends"
         }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect to the charger",
       "password_required": "The password is required for the cloud connection (or set a local host)",
-      "unknown": "Unknown error"
+      "unknown": "Unknown error",
+      "invalid_time": "Enter a time as HH:MM",
+      "tariff_zero_length": "The night tariff must start and end at different times"
     }
   },
   "entity": {
@@ -104,6 +108,9 @@
           "started_at": {
             "name": "Started at"
           },
+          "cost": {
+            "name": "Cost"
+          },
           "history": {
             "name": "History"
           }
@@ -126,14 +133,58 @@
           "active": {
             "name": "Active"
           },
+          "mode": {
+            "name": "Mode",
+            "state": {
+              "time": "Timed",
+              "energy": "Energy target",
+              "unlimited": "Unlimited"
+            }
+          },
           "unlimited": {
             "name": "Unlimited"
           },
           "minutes": {
             "name": "Minutes"
           },
+          "target_kwh": {
+            "name": "Target"
+          },
+          "delivered_kwh": {
+            "name": "Delivered"
+          },
+          "deadline": {
+            "name": "Deadline"
+          },
           "last_error": {
             "name": "Last error"
+          }
+        }
+      },
+      "energy_day_tariff": {
+        "name": "Energy day tariff"
+      },
+      "energy_night_tariff": {
+        "name": "Energy night tariff"
+      },
+      "energy_cost": {
+        "name": "Energy cost"
+      },
+      "current_price": {
+        "name": "Current price",
+        "state_attributes": {
+          "zone": {
+            "name": "Zone",
+            "state": {
+              "day": "Day",
+              "night": "Night"
+            }
+          },
+          "night_start": {
+            "name": "Night tariff starts"
+          },
+          "night_end": {
+            "name": "Night tariff ends"
           }
         }
       }
@@ -160,6 +211,15 @@
       },
       "boost_minutes": {
         "name": "Boost duration"
+      },
+      "boost_kwh": {
+        "name": "Boost kWh"
+      },
+      "price_day": {
+        "name": "Price day"
+      },
+      "price_night": {
+        "name": "Price night"
       }
     },
     "time": {
@@ -173,6 +233,9 @@
     "button": {
       "boost": {
         "name": "Charge now (boost)"
+      },
+      "boost_energy": {
+        "name": "Charge energy (boost)"
       },
       "reset_energy": {
         "name": "Reset kWh"
@@ -198,9 +261,27 @@
         }
       }
     },
+    "charge_energy": {
+      "name": "Charge energy",
+      "description": "Start charging now, bypassing the night timer, until the given energy is delivered; then stop and restore the timer. A safety deadline stops it if the target is not reached in time.",
+      "fields": {
+        "device_id": {
+          "name": "Charger",
+          "description": "The ElectroS charger."
+        },
+        "kwh": {
+          "name": "Energy",
+          "description": "How much energy to charge (kWh)."
+        },
+        "amps": {
+          "name": "Current",
+          "description": "Charging current in amperes (6-32, step 2). Default: the charging current setting."
+        }
+      }
+    },
     "extend_charge": {
       "name": "Extend charging",
-      "description": "Add minutes to the active timed charge (starts one if none is active).",
+      "description": "Add minutes to the active timed charge or kWh to the active energy charge (starts one if none is active). Give either minutes or kWh.",
       "fields": {
         "device_id": {
           "name": "Charger",
@@ -209,6 +290,10 @@
         "minutes": {
           "name": "Minutes",
           "description": "Minutes to add."
+        },
+        "kwh": {
+          "name": "Energy",
+          "description": "kWh to add."
         }
       }
     },

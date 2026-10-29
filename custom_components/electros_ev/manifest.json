@@ -1,14 +1,13 @@
 {
   "domain": "electros_ev",
-  "name": "ElectroS EV Charger",
+  "name": "Струм — розумна зарядка ElectroS",
   "codeowners": [],
   "config_flow": true,
   "dependencies": ["http", "frontend"],
   "documentation": "https://github.com/podzolkov/electros-ev-ha-from-andriy",
+  "integration_type": "device",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/podzolkov/electros-ev-ha-from-andriy/issues",
   "requirements": [],
-  "version": "2.0.0",
-  "integration_type": "device",
-  "icon": "mdi:ev-station"
+  "version": "2.1.0"
 }

@@ -1,0 +1,20 @@
+# Струм (ElectroS) — помічники для examples/automations.yaml (додати в configuration.yaml
+# або створити так само в UI: Налаштування → Пристрої та служби → Помічники).
+
+input_boolean:
+  electros_free_weekends:
+    name: Вільна зарядка у вихідні
+    icon: mdi:calendar-weekend
+  electros_holidays_free:
+    name: Заряджати будь-коли у свята
+    icon: mdi:party-popper
+
+input_number:
+  electros_session_limit_kwh:
+    name: Межа сесії зарядки
+    icon: mdi:battery-lock
+    min: 1
+    max: 80
+    step: 1
+    unit_of_measurement: kWh
+    mode: box

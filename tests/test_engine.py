@@ -32,6 +32,7 @@ from .common import (
     entity_id,
     local_dt,
     make_entry,
+    patch_api,
     state,
     storage_payload,
     stored,
@@ -451,6 +452,242 @@ async def test_failed_timer_write_is_retried_on_next_poll(
 
 
 # --------------------------------------------------------------------------- #
+# Charger offline (status 7/77) and stops that do not reach the charger
+# --------------------------------------------------------------------------- #
+
+
+async def test_offline_boost_expiry_is_written_when_the_charger_is_back(
+    hass: HomeAssistant,
+    charger: FakeCharger,
+    freezer: FrozenDateTimeFactory,
+    hass_storage: dict[str, Any],
+) -> None:
+    """The charger loses power during a boost while HA runs on a UPS. Nothing is
+    sent to it while offline; when it is back with its old (disabled) timer, HA
+    stops it, writes its window and does not adopt the stale one."""
+    freezer.move_to(local_dt(*WED_18H))
+    entry = await async_setup_entry(hass, charger)
+    await _call(hass, "charge_for", minutes=30)
+    assert charger.take_calls() == [("disable_timer",), ("start", 16)]
+    end = local_dt(*WED_18H) + timedelta(minutes=30)
+
+    charger.status = "77"
+    await async_poll(hass, entry)
+    assert state(hass, "sensor", "status").state == "offline"
+
+    await _fire(hass, freezer, end + timedelta(seconds=1))
+    assert charger.take_calls() == []  # neither stop nor timer: they would not arrive
+    _, attrs = _boost(hass)
+    assert attrs["active"] is False
+    assert attrs["last_error"] == "stop_failed"
+    assert state(hass, "switch", "night_timer").state == "on"
+    assert stored(hass_storage)["stop_pending"] == "unless_window"
+    assert stored(hass_storage)["last_written"] == ""  # what the charger really has
+
+    # Back long after ADOPT_GRACE, still charging, timer still off.
+    await _fire(hass, freezer, end + timedelta(minutes=20))
+    assert charger.take_calls() == []
+    charger.status = "2"
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("stop",), ("set_timer", "23:00", "07:00")]
+    assert state(hass, "switch", "night_timer").state == "on"
+    assert state(hass, "switch", "charging").state == "off"
+    assert _boost(hass)[1]["last_error"] is None
+    data = stored(hass_storage)
+    assert (data["last_written"], data["stop_pending"], data["night_enabled"]) == (
+        "23:00-07:00",
+        None,
+        True,
+    )
+
+    freezer.tick(timedelta(minutes=5))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+    assert state(hass, "switch", "night_timer").state == "on"
+
+
+async def test_settings_changed_while_offline_are_written_when_back(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """A change made while the charger is offline is kept and written later,
+    not reverted by the window the charger reports when it is back."""
+    freezer.move_to(local_dt(*WED_18H))
+    entry = await async_setup_entry(hass, charger)
+    charger.status = "7"
+    await async_poll(hass, entry)
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _call(hass, "set_timer", start="22:00")
+    assert err.value.translation_key == "command_failed"
+    with pytest.raises(HomeAssistantError):
+        await _switch(hass, "weekend_free", True)
+    assert charger.take_calls() == []
+    assert state(hass, "time", "timer_start").state == "22:00:00"
+
+    freezer.tick(timedelta(minutes=10))
+    charger.status = "1"
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("set_timer", "22:00", "07:00")]
+    assert state(hass, "time", "timer_start").state == "22:00:00"
+    assert state(hass, "switch", "weekend_free").state == "on"
+    assert state(hass, "switch", "night_timer").state == "on"
+
+    freezer.tick(timedelta(minutes=5))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+
+
+async def test_writes_just_before_the_charger_went_offline_are_redone(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """The boost ends while the charger is still reported online, but it goes
+    offline right then and gets neither command: the first online status
+    re-sends the stop and rewrites the window instead of adopting the old one."""
+    freezer.move_to(local_dt(*WED_18H))
+    entry = await async_setup_entry(hass, charger)
+    await _call(hass, "charge_for", minutes=30)
+    charger.take_calls()
+
+    charger.stop_status = "77"  # the refresh right after the stop sees it offline
+    await _fire(hass, freezer, local_dt(*WED_18H) + timedelta(minutes=30, seconds=1))
+    assert charger.take_calls() == [("stop",), ("set_timer", "23:00", "07:00")]
+    assert state(hass, "sensor", "status").state == "offline"
+
+    # Back with what it had before: no window, still charging.
+    charger.timer = None
+    charger.status = "2"
+    charger.stop_status = "1"
+    freezer.tick(timedelta(minutes=10))
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("stop",), ("set_timer", "23:00", "07:00")]
+    assert state(hass, "switch", "night_timer").state == "on"
+
+
+async def test_stop_charging_while_offline_fails_without_sending(
+    hass: HomeAssistant, charger: FakeCharger
+) -> None:
+    entry = await async_setup_entry(hass, charger)
+    charger.status = "77"
+    await async_poll(hass, entry)
+    with pytest.raises(HomeAssistantError) as err:
+        await _call(hass, "stop_charging")
+    assert err.value.translation_placeholders == {"command": "stop"}
+    assert charger.calls == []
+
+
+async def test_failed_stop_at_boost_end_is_retried(
+    hass: HomeAssistant,
+    charger: FakeCharger,
+    freezer: FrozenDateTimeFactory,
+    hass_storage: dict[str, Any],
+) -> None:
+    """Night timer off: nothing else would end the charge, so a failed stop is
+    retried on online polls while the charger still charges."""
+    charger.timer = None
+    freezer.move_to(local_dt(*WED_18H))
+    entry = await async_setup_entry(hass, charger)
+    await _call(hass, "charge_for", minutes=30)
+    assert charger.take_calls() == [("start", 16)]
+
+    charger.fail.add("stop")
+    await _fire(hass, freezer, local_dt(*WED_18H) + timedelta(minutes=30, seconds=1))
+    calls = charger.take_calls()
+    assert calls and set(calls) == {("stop",)}  # the stop and its retries failed
+    _, attrs = _boost(hass)
+    assert (attrs["active"], attrs["last_error"]) == (False, "stop_failed")
+    assert state(hass, "switch", "charging").state == "on"
+    assert stored(hass_storage)["stop_pending"] == "unless_window"
+
+    charger.unreachable = True  # no status, no retry
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+
+    charger.unreachable = False
+    charger.fail.clear()
+    await async_poll(hass, entry)
+    assert charger.take_calls() == [("stop",)]
+    assert state(hass, "switch", "charging").state == "off"
+    assert _boost(hass)[1]["last_error"] is None
+    assert stored(hass_storage)["stop_pending"] is None
+
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+
+
+async def test_failed_timed_stop_is_dropped_once_the_night_window_allows(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    """Q8 also for a retried stop: inside the restored night window the
+    schedule continues the charge, so the pending stop is not sent."""
+    freezer.move_to(local_dt(*WED_18H))
+    entry = await async_setup_entry(hass, charger)
+    await _call(hass, "charge_for", minutes=30)
+    charger.take_calls()
+
+    charger.fail.add("stop")
+    await _fire(hass, freezer, local_dt(*WED_18H) + timedelta(minutes=30, seconds=1))
+    calls = charger.take_calls()
+    assert ("set_timer", "23:00", "07:00") in calls
+    assert {call for call in calls if call[0] != "set_timer"} == {("stop",)}
+
+    charger.unreachable = True
+    await _fire(hass, freezer, local_dt(*WED_2330))
+    charger.unreachable = False
+    charger.fail.clear()
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+    assert _boost(hass)[1]["last_error"] is None
+    assert state(hass, "switch", "charging").state == "on"
+
+
+async def test_restart_retries_a_pending_stop(
+    hass: HomeAssistant, charger: FakeCharger, hass_storage: dict[str, Any]
+) -> None:
+    hass_storage[STORE_KEY] = storage_payload(_seeded(stop_pending="always"), version=2)
+    charger.status = "2"
+    await async_setup_entry(hass, charger, make_entry(hass))
+    assert charger.take_calls() == [("stop",)]
+    assert stored(hass_storage)["stop_pending"] is None
+    assert state(hass, "switch", "charging").state == "off"
+
+
+async def test_restart_drops_a_pending_stop_if_not_charging(
+    hass: HomeAssistant, charger: FakeCharger, hass_storage: dict[str, Any]
+) -> None:
+    hass_storage[STORE_KEY] = storage_payload(_seeded(stop_pending="always"), version=2)
+    charger.status = "1"
+    entry = await async_setup_entry(hass, charger, make_entry(hass))
+    assert charger.calls == []
+    assert entry.runtime_data.stored.stop_pending is None
+    charger.status = "2"  # charging again later (e.g. the night window) is not stopped
+    await async_poll(hass, entry)
+    assert charger.calls == []
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await async_settle(hass)
+    assert stored(hass_storage)["stop_pending"] is None
+
+
+async def test_a_new_start_cancels_a_pending_stop(
+    hass: HomeAssistant, charger: FakeCharger, freezer: FrozenDateTimeFactory
+) -> None:
+    charger.timer = None
+    freezer.move_to(local_dt(*WED_18H))
+    entry = await async_setup_entry(hass, charger)
+    await _call(hass, "charge_for", minutes=30)
+    charger.fail.add("stop")
+    await _fire(hass, freezer, local_dt(*WED_18H) + timedelta(minutes=30, seconds=1))
+    charger.take_calls()
+
+    charger.fail.clear()
+    await _switch(hass, "charging", True)  # the user wants it to charge after all
+    assert charger.take_calls() == [("start", 16)]
+    assert _boost(hass)[1]["last_error"] is None
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+    assert state(hass, "switch", "charging").state == "on"
+
+
+# --------------------------------------------------------------------------- #
 # Restart and unload
 # --------------------------------------------------------------------------- #
 
@@ -552,16 +789,101 @@ async def test_restart_with_unlimited_bypass(
     assert charger.take_calls() == [("set_timer", "23:00", "07:00")]
 
 
-async def test_restart_writes_once_if_charger_differs(
+async def test_restart_adopts_window_changed_while_stopped(
     hass: HomeAssistant, charger: FakeCharger, hass_storage: dict[str, Any]
 ) -> None:
-    """A window changed while HA was down is overwritten once at startup."""
+    """The device differs from what HA last wrote: changed in the web panel; adopt it."""
     hass_storage[STORE_KEY] = storage_payload(_seeded())
     charger.timer = ("21:00", "05:00")
     entry = await async_setup_entry(hass, charger, make_entry(hass))
-    assert charger.take_calls() == [("set_timer", "23:00", "07:00")]
+    assert charger.take_calls() == []
+    assert state(hass, "switch", "night_timer").state == "on"
+    assert state(hass, "time", "timer_start").state == "21:00:00"
+    assert state(hass, "time", "timer_end").state == "05:00:00"
+    assert stored(hass_storage)["last_written"] == "21:00-05:00"
     await async_poll(hass, entry)
     assert charger.take_calls() == []
+
+
+async def test_restart_adopts_timer_switched_off_while_stopped(
+    hass: HomeAssistant, charger: FakeCharger, hass_storage: dict[str, Any]
+) -> None:
+    hass_storage[STORE_KEY] = storage_payload(_seeded())
+    charger.timer = None
+    await async_setup_entry(hass, charger, make_entry(hass))
+    assert charger.take_calls() == []
+    assert state(hass, "switch", "night_timer").state == "off"
+    assert state(hass, "time", "timer_start").state == "23:00:00"  # times are kept
+
+
+async def test_restart_writes_once_if_ha_wants_something_else(
+    hass: HomeAssistant, charger: FakeCharger, hass_storage: dict[str, Any]
+) -> None:
+    """The device still has HA's last write, but HA wants another window: write once."""
+    hass_storage[STORE_KEY] = storage_payload(
+        _seeded(timer_start="22:00", last_written="23:00-07:00")
+    )
+    charger.timer = ("23:00", "07:00")
+    entry = await async_setup_entry(hass, charger, make_entry(hass))
+    assert charger.take_calls() == [("set_timer", "22:00", "07:00")]
+    assert state(hass, "time", "timer_start").state == "22:00:00"
+    await async_poll(hass, entry)
+    assert charger.take_calls() == []
+
+
+async def test_restart_after_weekend_restores_the_window(
+    hass: HomeAssistant,
+    charger: FakeCharger,
+    freezer: FrozenDateTimeFactory,
+    hass_storage: dict[str, Any],
+) -> None:
+    """HA disabled the timer for the weekend and was down until Monday: device ==
+    last_written, so this is not a panel change; the window is written back."""
+    freezer.move_to(local_dt(2026, 11, 2, 12, 0))  # Monday
+    hass_storage[STORE_KEY] = storage_payload(_seeded(weekend_free=True, last_written=""))
+    charger.timer = None
+    await async_setup_entry(hass, charger, make_entry(hass))
+    assert charger.take_calls() == [("set_timer", "23:00", "07:00")]
+    assert state(hass, "switch", "night_timer").state == "on"
+
+
+async def test_restart_during_a_boost_does_not_adopt_the_window(
+    hass: HomeAssistant,
+    charger: FakeCharger,
+    freezer: FrozenDateTimeFactory,
+    hass_storage: dict[str, Any],
+) -> None:
+    """During a boost HA owns the timer: a window found at startup is switched off
+    again (not adopted), and HA's own window is restored when the boost ends."""
+    freezer.move_to(local_dt(*WED_18H))
+    end = local_dt(*WED_18H) + timedelta(minutes=20)
+    hass_storage[STORE_KEY] = storage_payload(
+        _seeded(last_written="", boost={"end": end.isoformat(), "minutes": 30, "restore": True})
+    )
+    charger.status = "2"
+    charger.timer = ("21:00", "05:00")
+    await async_setup_entry(hass, charger, make_entry(hass))
+    assert charger.take_calls() == [("disable_timer",)]
+    assert state(hass, "time", "timer_start").state == "23:00:00"
+    assert _boost(hass)[1]["active"] is True
+
+    await _fire(hass, freezer, end + timedelta(seconds=1))
+    assert charger.take_calls() == [("stop",), ("set_timer", "23:00", "07:00")]
+
+
+async def test_restart_when_the_charger_is_unreachable(
+    hass: HomeAssistant, charger: FakeCharger, hass_storage: dict[str, Any]
+) -> None:
+    """Setup retries while the charger cannot be reached; nothing is decided blindly."""
+    hass_storage[STORE_KEY] = storage_payload(_seeded(timer_start="22:00"))
+    charger.unreachable = True
+    entry = make_entry(hass)
+    with patch_api(charger):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await async_settle(hass)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert charger.calls == []
+    assert stored(hass_storage)["timer_start"] == "22:00"
 
 
 async def test_restart_without_difference_writes_nothing(
